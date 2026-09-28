@@ -1,0 +1,23 @@
+{
+  "run_name": "relaxed-batchA",
+  "qc": {
+    "batchA": {
+      "min_total_counts": 100,
+      "min_detected_genes": 3
+    },
+    "batchB": {
+      "min_total_counts": 50,
+      "min_detected_genes": 2
+    }
+  },
+  "normalize": {
+    "batchA": {
+      "target_sum": 10000.0,
+      "log1p": true
+    },
+    "batchB": {
+      "target_sum": 1000.0,
+      "log1p": true
+    }
+  }
+}
