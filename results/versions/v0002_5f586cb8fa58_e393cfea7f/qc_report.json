@@ -2,25 +2,18 @@
   "kept": [
     "cell_a1",
     "cell_a2",
+    "cell_a3",
     "cell_b1",
     "cell_b2"
   ],
   "dropped": [
     {
-      "cell_id": "cell_a3",
-      "batch": "batchA",
-      "reasons": [
-        "total_counts<100",
-        "detected_genes<3"
-      ]
-    },
-    {
       "cell_id": "cell_a4",
       "batch": "batchA",
       "reasons": [
         "all_zero_counts",
-        "total_counts<100",
-        "detected_genes<3"
+        "total_counts<10",
+        "detected_genes<2"
       ]
     }
   ],

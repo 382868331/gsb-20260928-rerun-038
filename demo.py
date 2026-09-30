@@ -1,8 +1,7 @@
-"""端到端演示：两个批次用不同规则跑完整流程，结果分版本保存。"""
+"""端到端演示：并行比较两套筛选规则，结果分版本保存且互不覆盖。"""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 from pathlib import Path
@@ -11,6 +10,7 @@ from scplatform import (
     NormalizeParams,
     QCParams,
     ResultStore,
+    compare_qc,
     filter_cells,
     normalize,
 )
@@ -19,19 +19,14 @@ from scplatform.toydata import make_toy_matrix
 RESULTS = Path("results")
 
 
-def run_pipeline(store: ResultStore, run_name: str, qc_strict_a: bool) -> Path:
+def run_pipeline(
+    store: ResultStore,
+    run_name: str,
+    qc_params: dict,
+    norm_params: dict,
+    comparison: dict | None = None,
+) -> Path:
     matrix = make_toy_matrix()
-
-    # 两个批次使用不同规则：batchA 严格，batchB 宽松
-    qc_params = {
-        "batchA": QCParams(min_total_counts=500 if qc_strict_a else 100,
-                           min_detected_genes=3),
-        "batchB": QCParams(min_total_counts=50, min_detected_genes=2),
-    }
-    norm_params = {
-        "batchA": NormalizeParams(target_sum=1e4, log1p=True),
-        "batchB": NormalizeParams(target_sum=1e3, log1p=True),
-    }
 
     filtered, report = filter_cells(matrix, qc_params)
     normalized, rule_used = normalize(filtered, norm_params)
@@ -41,9 +36,9 @@ def run_pipeline(store: ResultStore, run_name: str, qc_strict_a: bool) -> Path:
         "qc": {b: p.to_dict() for b, p in qc_params.items()},
         "normalize": {b: p.to_dict() for b, p in norm_params.items()},
     }
-    fingerprint = hashlib.sha256(matrix.counts.tobytes()).hexdigest()[:10]
 
     out_dir = store.save_run(
+        source_matrix=matrix,
         params=params,
         qc_report=report.to_dict(),
         normalized=normalized,
@@ -51,7 +46,7 @@ def run_pipeline(store: ResultStore, run_name: str, qc_strict_a: bool) -> Path:
         gene_ids=list(filtered.gene_ids),
         batch_of_cell=list(filtered.batch_of_cell),
         rule_used=rule_used,
-        input_fingerprint=fingerprint,
+        comparison=comparison,
     )
 
     print(f"[{run_name}] 保留细胞: {report.kept_ids}")
@@ -66,9 +61,43 @@ def main() -> None:
         shutil.rmtree(RESULTS)
     store = ResultStore(RESULTS)
 
-    run_pipeline(store, "baseline", qc_strict_a=True)
+    qc_strict = {
+        "batchA": QCParams(min_total_counts=500, min_detected_genes=3),
+        "batchB": QCParams(min_total_counts=50, min_detected_genes=2),
+    }
+    qc_relaxed = {
+        "batchA": QCParams(min_total_counts=10, min_detected_genes=2),
+        "batchB": QCParams(min_total_counts=50, min_detected_genes=2),
+    }
+    norm_params = {
+        "batchA": NormalizeParams(target_sum=1e4, log1p=True),
+        "batchB": NormalizeParams(target_sum=1e3, log1p=True),
+    }
+
+    # 同一原始矩阵上并行比较两套筛选参数：哪些细胞进入/离开及原因
+    comparison = compare_qc(
+        make_toy_matrix(), qc_strict, qc_relaxed,
+        baseline_label="strict", candidate_label="relaxed-batchA",
+    )
+    print("[compare] 进入(新保留):", comparison.entered_ids)
+    print("[compare] 离开(新剔除):", comparison.left_ids)
+    for change in comparison.changes:
+        if change.direction != "unchanged":
+            print(
+                f"[compare] {change.cell_id} {change.direction}: "
+                f"strict 原因={change.before_reasons} -> relaxed 原因={change.after_reasons}"
+            )
+    comparison_dict = comparison.to_dict()
+
+    baseline_dir = run_pipeline(store, "baseline", qc_strict, norm_params,
+                                comparison=comparison_dict)
     # 参数变更 -> 生成新版本，不覆盖旧结果
-    run_pipeline(store, "relaxed-batchA", qc_strict_a=False)
+    run_pipeline(store, "relaxed-batchA", qc_relaxed, norm_params,
+                 comparison=comparison_dict)
+    # 相同输入+相同参数重跑 -> 幂等，复用已发布版本，不产生覆盖
+    rerun_dir = run_pipeline(store, "baseline", qc_strict, norm_params,
+                             comparison=comparison_dict)
+    assert rerun_dir == baseline_dir, "相同输入与参数必须复用已发布版本"
 
     versions = store.list_versions()
     print(f"\n共 {len(versions)} 个版本:")

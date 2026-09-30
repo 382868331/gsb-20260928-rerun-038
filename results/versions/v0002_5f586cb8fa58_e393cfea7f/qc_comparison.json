@@ -1,0 +1,97 @@
+{
+  "baseline": "strict",
+  "candidate": "relaxed-batchA",
+  "entered": [
+    "cell_a3"
+  ],
+  "left": [],
+  "cells": [
+    {
+      "cell_id": "cell_a1",
+      "change": "unchanged",
+      "baseline": {
+        "kept": true,
+        "reasons": []
+      },
+      "candidate": {
+        "kept": true,
+        "reasons": []
+      }
+    },
+    {
+      "cell_id": "cell_a2",
+      "change": "unchanged",
+      "baseline": {
+        "kept": true,
+        "reasons": []
+      },
+      "candidate": {
+        "kept": true,
+        "reasons": []
+      }
+    },
+    {
+      "cell_id": "cell_a3",
+      "change": "entered",
+      "baseline": {
+        "kept": false,
+        "reasons": [
+          "total_counts<500",
+          "detected_genes<3"
+        ]
+      },
+      "candidate": {
+        "kept": true,
+        "reasons": []
+      }
+    },
+    {
+      "cell_id": "cell_a4",
+      "change": "unchanged",
+      "baseline": {
+        "kept": false,
+        "reasons": [
+          "all_zero_counts",
+          "total_counts<500",
+          "detected_genes<3"
+        ]
+      },
+      "candidate": {
+        "kept": false,
+        "reasons": [
+          "all_zero_counts",
+          "total_counts<10",
+          "detected_genes<2"
+        ]
+      }
+    },
+    {
+      "cell_id": "cell_b1",
+      "change": "unchanged",
+      "baseline": {
+        "kept": true,
+        "reasons": []
+      },
+      "candidate": {
+        "kept": true,
+        "reasons": []
+      }
+    },
+    {
+      "cell_id": "cell_b2",
+      "change": "unchanged",
+      "baseline": {
+        "kept": true,
+        "reasons": []
+      },
+      "candidate": {
+        "kept": true,
+        "reasons": []
+      }
+    }
+  ],
+  "empty_batches": {
+    "baseline": [],
+    "candidate": []
+  }
+}

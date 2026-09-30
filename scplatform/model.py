@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 import numpy as np
@@ -63,3 +65,30 @@ class CountMatrix:
             gene_ids=self.gene_ids,
             batch_of_cell=tuple(self.batch_of_cell[i] for i in idx),
         )
+
+    @staticmethod
+    def _digest(payload: object) -> str:
+        blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+
+    def identity_digests(self) -> dict[str, str]:
+        """分别给出原始计数、细胞身份、基因身份、批次归属的摘要。
+
+        摘要只取决于内容本身，与文件名、调用方给的标记无关：
+        任何一部分被替换，对应摘要必然改变。
+        """
+        counts_payload = {
+            "dtype": str(self.counts.dtype),
+            "shape": list(self.counts.shape),
+            "data": self.counts.tobytes().hex(),
+        }
+        return {
+            "counts": self._digest(counts_payload),
+            "cell_ids": self._digest(list(self.cell_ids)),
+            "gene_ids": self._digest(list(self.gene_ids)),
+            "batch_of_cell": self._digest(list(self.batch_of_cell)),
+        }
+
+    def content_fingerprint(self) -> str:
+        """绑定原始矩阵内容与全部身份的整体指纹（平台自行计算）。"""
+        return self._digest(self.identity_digests())

@@ -2,8 +2,8 @@
   "run_name": "relaxed-batchA",
   "qc": {
     "batchA": {
-      "min_total_counts": 100,
-      "min_detected_genes": 3
+      "min_total_counts": 10,
+      "min_detected_genes": 2
     },
     "batchB": {
       "min_total_counts": 50,

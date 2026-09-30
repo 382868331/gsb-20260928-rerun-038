@@ -1,0 +1,29 @@
+{
+  "input_fingerprint": "5f586cb8fa581ce7aadba7afc3368e377d5c2db4861c6f36aa6a6fc5d5a445d5",
+  "digests": {
+    "counts": "97fcf2c4d233b302346a63a030ef70d4e09d9b0cc6c4cb32bc4771dcd8fd6650",
+    "cell_ids": "b876cd53e991273ef3875c54d58c9f9e5200c7a7a1926fd3b8301b58053aaa0a",
+    "gene_ids": "3a5979424cc17d23666db2e4cc078aae0c15523a257d0f517729b07952c484ca",
+    "batch_of_cell": "c9eb245bd6db0fa560652d7bb0886884ae9c42384e494c1d8898bf1ab61c65d5"
+  },
+  "n_cells": 6,
+  "n_genes": 4,
+  "cell_ids": [
+    "cell_a1",
+    "cell_a2",
+    "cell_a3",
+    "cell_a4",
+    "cell_b1",
+    "cell_b2"
+  ],
+  "gene_ids": [
+    "GeneA",
+    "GeneB",
+    "GeneC",
+    "GeneD"
+  ],
+  "batches": [
+    "batchA",
+    "batchB"
+  ]
+}
