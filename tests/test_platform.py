@@ -8,6 +8,7 @@ import pytest
 from scplatform import (
     CountMatrix,
     NormalizeParams,
+    PublishRejectedError,
     QCParams,
     ResultStore,
     compare_qc,
@@ -287,3 +288,132 @@ def test_load_matrix_and_pipeline_roundtrip(tmp_path):
     assert identity["cell_ids"] == ["c1", "c2"]
     assert identity["gene_ids"] == ["G1", "G2", "G3"]
     assert store.find_version(matrix, params) == out
+
+
+def _pipeline_parts():
+    matrix = make_toy_matrix()
+    filtered, report = filter_cells(matrix, QC)
+    normed, rule_used = normalize(filtered, NORM)
+    return matrix, filtered, report, normed, rule_used
+
+
+def test_save_rejects_unknown_cell_and_leaves_no_partial_version(tmp_path):
+    store = ResultStore(tmp_path)
+    matrix, filtered, report, normed, rule_used = _pipeline_parts()
+    kwargs = _save_kwargs(matrix, filtered, report, normed, rule_used)
+    kwargs["cell_ids"] = list(filtered.cell_ids) + ["ghost_cell"]
+    kwargs["batch_of_cell"] = list(filtered.batch_of_cell) + ["batchA"]
+    kwargs["normalized"] = np.vstack([normed, np.zeros((1, normed.shape[1]))])
+    with pytest.raises(PublishRejectedError, match="不存在的细胞身份") as exc:
+        store.save_run(params={"qc": "x"}, **kwargs)
+    assert any("ghost_cell" in r for r in exc.value.reasons)
+    # 整次拒绝：不产生任何版本，也不留暂存残骸
+    assert store.list_versions() == []
+    assert list((tmp_path / "versions").glob(".staging-*")) == []
+
+
+def test_save_rejects_duplicate_and_illegal_identities(tmp_path):
+    store = ResultStore(tmp_path)
+    matrix, filtered, report, normed, rule_used = _pipeline_parts()
+    kwargs = _save_kwargs(matrix, filtered, report, normed, rule_used)
+    kwargs["cell_ids"] = ["cell_a1", "cell_a1", "cell_b1"]
+    kwargs["batch_of_cell"] = ["batchA", "batchA", "batchB"]
+    kwargs["normalized"] = normed[:3]
+    with pytest.raises(PublishRejectedError, match="重复细胞身份") as exc:
+        store.save_run(params={"qc": "x"}, **kwargs)
+    assert any("cell_a1" in r for r in exc.value.reasons)
+    assert store.list_versions() == []
+
+
+def test_save_rejects_batch_mismatch(tmp_path):
+    store = ResultStore(tmp_path)
+    matrix, filtered, report, normed, rule_used = _pipeline_parts()
+    kwargs = _save_kwargs(matrix, filtered, report, normed, rule_used)
+    bad_batches = list(filtered.batch_of_cell)
+    bad_batches[0] = "batchB"  # cell_a1 在来源中属于 batchA
+    kwargs["batch_of_cell"] = bad_batches
+    with pytest.raises(PublishRejectedError, match="批次") as exc:
+        store.save_run(params={"qc": "x"}, **kwargs)
+    assert any("cell_a1" in r for r in exc.value.reasons)
+    assert store.list_versions() == []
+
+
+def test_save_rejects_gene_mismatch(tmp_path):
+    store = ResultStore(tmp_path)
+    matrix, filtered, report, normed, rule_used = _pipeline_parts()
+    kwargs = _save_kwargs(matrix, filtered, report, normed, rule_used)
+    kwargs["gene_ids"] = ["GeneA", "GeneB", "GeneC", "NotInSource"]
+    with pytest.raises(PublishRejectedError, match="基因身份与来源不一致"):
+        store.save_run(params={"qc": "x"}, **kwargs)
+    assert store.list_versions() == []
+
+
+def test_reordered_result_keeps_source_identity_and_verifies(tmp_path):
+    """结果顺序调整不改变来源身份：保存后重开仍能逐细胞核对。"""
+    store = ResultStore(tmp_path)
+    matrix, filtered, report, normed, rule_used = _pipeline_parts()
+    order = [2, 0, 3, 1]  # 打乱结果行顺序
+    kwargs = _save_kwargs(matrix, filtered, report, normed, rule_used)
+    kwargs["cell_ids"] = [filtered.cell_ids[i] for i in order]
+    kwargs["batch_of_cell"] = [filtered.batch_of_cell[i] for i in order]
+    kwargs["normalized"] = normed[order]
+    out = store.save_run(params={"qc": "reordered"}, **kwargs)
+    # 来源指纹与顺序无关
+    identity = json.loads((out / "input_identity.json").read_text(encoding="utf-8"))
+    assert identity["input_fingerprint"] == matrix.content_fingerprint()
+    # 重开核对：每个保留细胞的身份与批次归属都能对上来源
+    verified = store.verify_version(out, matrix)
+    assert verified["kept_cell_ids"] == kwargs["cell_ids"]
+    assert verified["batch_of_cell"] == kwargs["batch_of_cell"]
+
+
+def test_verify_version_detects_foreign_source(tmp_path):
+    store = ResultStore(tmp_path)
+    matrix, filtered, report, normed, rule_used = _pipeline_parts()
+    out = store.save_run(
+        params={"qc": "x"}, **_save_kwargs(matrix, filtered, report, normed, rule_used)
+    )
+    other = CountMatrix(
+        counts=matrix.counts.copy(),
+        cell_ids=matrix.cell_ids,
+        gene_ids=tuple(f"Z{i}" for i in range(matrix.n_genes)),
+        batch_of_cell=matrix.batch_of_cell,
+    )
+    with pytest.raises(PublishRejectedError):
+        store.verify_version(out, other)
+
+
+def test_merge_view_intersection_only_and_reasons():
+    matrix = make_toy_matrix()
+    relaxed = dict(QC, batchA=QCParams(min_total_counts=10, min_detected_genes=1))
+    comparison = compare_qc(matrix, QC, relaxed, baseline_label="strict",
+                            candidate_label="relaxed")
+    assert set(comparison.intersection_ids) == {"cell_a1", "cell_a2", "cell_b1", "cell_b2"}
+    assert comparison.only_candidate_ids == ["cell_a3"]
+    assert comparison.only_baseline_ids == []
+    merge = comparison.to_dict()["merge"]
+    only_relaxed = merge["only_relaxed"]
+    assert only_relaxed[0]["cell_id"] == "cell_a3"
+    assert any("total_counts<500" in r for r in only_relaxed[0]["strict_reasons"])
+    assert only_relaxed[0]["relaxed_reasons"] == []
+    assert comparison.to_dict()["source_fingerprint"] == matrix.content_fingerprint()
+
+
+def test_merge_reports_rejects_different_sources():
+    from scplatform.compare import merge_reports
+
+    matrix = make_toy_matrix()
+    _, report1 = filter_cells(matrix, QC)
+    other = CountMatrix(
+        counts=matrix.counts.copy(),
+        cell_ids=matrix.cell_ids,  # 相同名称、不同来源
+        gene_ids=matrix.gene_ids,
+        batch_of_cell=matrix.batch_of_cell,
+    )
+    changed = other.counts.copy()
+    changed[0, 0] += 1
+    other = CountMatrix(counts=changed, cell_ids=other.cell_ids,
+                        gene_ids=other.gene_ids, batch_of_cell=other.batch_of_cell)
+    _, report2 = filter_cells(other, QC)
+    with pytest.raises(ValueError, match="来源指纹不同"):
+        merge_reports(report1, report2)

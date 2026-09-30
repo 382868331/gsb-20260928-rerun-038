@@ -44,6 +44,42 @@ class QCComparison:
     def left_ids(self) -> list[str]:
         return [c.cell_id for c in self.changes if c.direction == "left"]
 
+    @property
+    def intersection_ids(self) -> list[str]:
+        """两套方案都保留的细胞（交集）。"""
+        return [c.cell_id for c in self.changes if c.before_kept and c.after_kept]
+
+    @property
+    def only_baseline_ids(self) -> list[str]:
+        """仅 baseline 方案保留、candidate 排除的细胞。"""
+        return [c.cell_id for c in self.changes if c.before_kept and not c.after_kept]
+
+    @property
+    def only_candidate_ids(self) -> list[str]:
+        """仅 candidate 方案保留、baseline 排除的细胞。"""
+        return [c.cell_id for c in self.changes if not c.before_kept and c.after_kept]
+
+    def merge_view(self) -> dict:
+        """合并比较视图：交集、仅某方案保留的细胞及各自排除原因。
+
+        身份来自同一份原始矩阵（compare_qc 已校验两次筛选覆盖一致），
+        同名但不同来源的细胞不会在此被合并。
+        """
+        def detail(cell_id: str) -> dict:
+            change = next(c for c in self.changes if c.cell_id == cell_id)
+            return {
+                "cell_id": cell_id,
+                "batch": change.batch,
+                self.baseline_label + "_reasons": list(change.before_reasons),
+                self.candidate_label + "_reasons": list(change.after_reasons),
+            }
+
+        return {
+            "intersection": [detail(c) for c in self.intersection_ids],
+            "only_" + self.baseline_label: [detail(c) for c in self.only_baseline_ids],
+            "only_" + self.candidate_label: [detail(c) for c in self.only_candidate_ids],
+        }
+
     def to_dict(self) -> dict:
         def verdict_map(report: QCReport) -> dict[str, dict]:
             return {
@@ -59,6 +95,9 @@ class QCComparison:
             "candidate": self.candidate_label,
             "entered": self.entered_ids,
             "left": self.left_ids,
+            "intersection": self.intersection_ids,
+            "merge": self.merge_view(),
+            "source_fingerprint": self.baseline_report.source_fingerprint,
             "cells": [
                 {
                     "cell_id": cell_id,
@@ -86,6 +125,7 @@ def compare_qc(
     """在同一份原始矩阵上并行跑两套筛选规则，逐细胞比较去留及原因。"""
     _, baseline_report = filter_cells(matrix, baseline_params)
     _, candidate_report = filter_cells(matrix, candidate_params)
+    merge_reports(baseline_report, candidate_report)
 
     before = {v.cell_id: v for v in baseline_report.verdicts}
     after = {v.cell_id: v for v in candidate_report.verdicts}
@@ -112,3 +152,21 @@ def compare_qc(
         candidate_report=candidate_report,
         changes=changes,
     )
+
+
+def merge_reports(baseline_report: QCReport, candidate_report: QCReport) -> None:
+    """校验两份筛选报告来自同一来源，可以安全合并比较。
+
+    来源指纹不同（同名细胞可能来自不同矩阵）或任一侧存在重复身份时
+    拒绝，绝不把相同名称但不同来源的细胞合并成一条记录。
+    """
+    if baseline_report.source_fingerprint != candidate_report.source_fingerprint:
+        raise ValueError(
+            "两份筛选结果来源指纹不同，拒绝合并比较："
+            "相同名称的细胞可能来自不同矩阵，不能合并"
+        )
+    for label, report in (("baseline", baseline_report), ("candidate", candidate_report)):
+        ids = [v.cell_id for v in report.verdicts]
+        dupes = sorted({c for c in ids if ids.count(c) > 1})
+        if dupes:
+            raise ValueError(f"{label} 结果含重复细胞身份，拒绝合并比较: {dupes}")

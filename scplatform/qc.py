@@ -33,6 +33,7 @@ class QCReport:
     verdicts: list[CellVerdict]
     empty_batches: list[str]
     all_zero_cells: list[str]
+    source_fingerprint: str = ""
 
     @property
     def kept_ids(self) -> list[str]:
@@ -52,6 +53,7 @@ class QCReport:
             ],
             "empty_batches": self.empty_batches,
             "all_zero_cells": self.all_zero_cells,
+            "source_fingerprint": self.source_fingerprint,
         }
 
 
@@ -90,5 +92,10 @@ def filter_cells(
     kept_batches = {matrix.batch_of_cell[i] for i in keep_idx}
     empty_batches = [b for b in matrix.batches if b not in kept_batches]
 
-    report = QCReport(verdicts=verdicts, empty_batches=empty_batches, all_zero_cells=all_zero)
+    report = QCReport(
+        verdicts=verdicts,
+        empty_batches=empty_batches,
+        all_zero_cells=all_zero,
+        source_fingerprint=matrix.content_fingerprint(),
+    )
     return matrix.subset_cells(keep_idx), report

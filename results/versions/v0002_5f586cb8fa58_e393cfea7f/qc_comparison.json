@@ -5,6 +5,53 @@
     "cell_a3"
   ],
   "left": [],
+  "intersection": [
+    "cell_a1",
+    "cell_a2",
+    "cell_b1",
+    "cell_b2"
+  ],
+  "merge": {
+    "intersection": [
+      {
+        "cell_id": "cell_a1",
+        "batch": "batchA",
+        "strict_reasons": [],
+        "relaxed-batchA_reasons": []
+      },
+      {
+        "cell_id": "cell_a2",
+        "batch": "batchA",
+        "strict_reasons": [],
+        "relaxed-batchA_reasons": []
+      },
+      {
+        "cell_id": "cell_b1",
+        "batch": "batchB",
+        "strict_reasons": [],
+        "relaxed-batchA_reasons": []
+      },
+      {
+        "cell_id": "cell_b2",
+        "batch": "batchB",
+        "strict_reasons": [],
+        "relaxed-batchA_reasons": []
+      }
+    ],
+    "only_strict": [],
+    "only_relaxed-batchA": [
+      {
+        "cell_id": "cell_a3",
+        "batch": "batchA",
+        "strict_reasons": [
+          "total_counts<500",
+          "detected_genes<3"
+        ],
+        "relaxed-batchA_reasons": []
+      }
+    ]
+  },
+  "source_fingerprint": "5f586cb8fa581ce7aadba7afc3368e377d5c2db4861c6f36aa6a6fc5d5a445d5",
   "cells": [
     {
       "cell_id": "cell_a1",

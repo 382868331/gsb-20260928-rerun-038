@@ -4,7 +4,7 @@ from .model import CountMatrix
 from .qc import QCParams, QCReport, filter_cells
 from .normalize import NormalizeParams, normalize
 from .compare import CellChange, QCComparison, compare_qc
-from .store import ResultStore
+from .store import PublishRejectedError, ResultStore, validate_result_identities
 from .io import load_matrix
 
 __all__ = [
@@ -18,5 +18,7 @@ __all__ = [
     "QCComparison",
     "compare_qc",
     "ResultStore",
+    "PublishRejectedError",
+    "validate_result_identities",
     "load_matrix",
 ]
