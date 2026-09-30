@@ -23,6 +23,8 @@ class CellVerdict:
     cell_id: str
     batch: str
     kept: bool
+    total_counts: int
+    detected_genes: int
     reasons: list[str] = field(default_factory=list)
 
 
@@ -46,7 +48,13 @@ class QCReport:
         return {
             "kept": self.kept_ids,
             "dropped": [
-                {"cell_id": v.cell_id, "batch": v.batch, "reasons": v.reasons}
+                {
+                    "cell_id": v.cell_id,
+                    "batch": v.batch,
+                    "total_counts": v.total_counts,
+                    "detected_genes": v.detected_genes,
+                    "reasons": v.reasons,
+                }
                 for v in self.verdicts
                 if not v.kept
             ],
@@ -85,7 +93,16 @@ def filter_cells(
         kept = not reasons
         if kept:
             keep_idx.append(i)
-        verdicts.append(CellVerdict(cell_id=cell_id, batch=batch, kept=kept, reasons=reasons))
+        verdicts.append(
+            CellVerdict(
+                cell_id=cell_id,
+                batch=batch,
+                kept=kept,
+                total_counts=total,
+                detected_genes=detected,
+                reasons=reasons,
+            )
+        )
 
     kept_batches = {matrix.batch_of_cell[i] for i in keep_idx}
     empty_batches = [b for b in matrix.batches if b not in kept_batches]

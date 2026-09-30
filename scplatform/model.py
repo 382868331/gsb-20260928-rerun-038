@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 import numpy as np
@@ -63,3 +65,22 @@ class CountMatrix:
             gene_ids=self.gene_ids,
             batch_of_cell=tuple(self.batch_of_cell[i] for i in idx),
         )
+
+    def identity_payload(self) -> dict:
+        """决定输入身份的全部要素：矩阵字节 + 细胞/基因身份 + 批次归属。
+
+        形状、dtype 一并纳入，避免不同内容因字节长度碰巧一致而撞指纹。
+        """
+        return {
+            "shape": list(self.counts.shape),
+            "dtype": str(self.counts.dtype),
+            "counts_sha256": hashlib.sha256(self.counts.tobytes()).hexdigest(),
+            "cell_ids": list(self.cell_ids),
+            "gene_ids": list(self.gene_ids),
+            "batch_of_cell": list(self.batch_of_cell),
+        }
+
+    def fingerprint(self) -> str:
+        """对原始矩阵内容与身份求指纹，平台内部计算，调用方无法随手指定。"""
+        blob = json.dumps(self.identity_payload(), sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
