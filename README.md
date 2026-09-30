@@ -9,6 +9,14 @@
 - 相同输入 + 相同参数重复运行是幂等的，复用已发布版本；已发布结果目录只读，
   任何后来的试验都不能覆盖。
 - 支持多套筛选参数的并行比较，逐细胞列出进入（entered）/离开（left）及原因。
+- **发布前身份核对**：结果中的细胞、基因、批次关系必须与来源原始矩阵逐项一致；
+  非法身份（来源中不存在的细胞/基因）、重复身份、批次错配、形状错配都会聚合为
+  清楚的拒绝说明并**整次拒绝发布**（在写入任何文件之前校验，不留下暂存或部分版本）。
+- **多方案合并比较**：merge_qc 明确给出所有方案的交集、仅某方案保留的细胞及
+  各自排除原因；细胞身份按“来源指纹 + 细胞 ID”限定，相同名称但不同来源的细胞
+  绝不合并，同名碰撞在 name_collisions 中单独列出。
+- **重开核对**：ResultStore.load_run 重新打开已发布版本并逐对象核对身份；
+  结果顺序调整与重复保存不改变来源身份，提供原始矩阵时还会复核输入指纹。
 
 ## 依赖
 
@@ -74,6 +82,17 @@ comparison = compare_qc(matrix, qc_params, other_qc,
 print(comparison.entered_ids, comparison.left_ids)
 comparison.to_dict()  # 含每个细胞在两套规则下的 kept/reasons
 
+# 4b. 多套方案合并比较：交集 / 仅某方案保留 / 各自排除原因
+from scplatform import merge_qc
+merged = merge_qc(
+    {"strict": matrix, "relaxed": matrix},
+    {"strict": qc_params, "relaxed": other_qc},
+)
+merged.intersection_ids()          # 所有方案都保留的细胞
+merged.only_kept_ids("relaxed")    # 仅 relaxed 保留的细胞
+merged.name_collisions             # 同名但不同来源的细胞（不合并）
+merged.to_dict()                   # 含每个细胞被各方案排除的原因
+
 # 5. 保存（指纹由平台从原始矩阵计算，无需也不能由调用方指定）
 store = ResultStore("results")
 params = {
@@ -107,6 +126,28 @@ out_dir = store.save_run(
 
 核对方式：重新载入原始矩阵后比较 `input_identity.json` 中的摘要即可；
 文件改名不影响指纹，任何计数或身份改动都会让摘要变化并产生新版本。
+
+### 发布前拒绝与重开核对
+
+`save_run` 在创建版本目录之前执行完整身份校验，任何不匹配都抛出
+`scplatform.PublishRejected`，其 `errors` 列表聚合全部问题（例如同时存在
+重复细胞身份和批次错配时，两条说明都会保留）：
+
+- 细胞/基因身份在原始矩阵中不存在（非法身份）或在结果中重复；
+- 结果细胞的批次归属或 `rule_used` 与其来源批次错配；
+- 归一化矩阵行列数与随附身份不一致，或基因列被增删；
+- `qc_report.kept` 与实际结果细胞集合不一致。
+
+拒绝时不写入任何文件、不创建暂存目录，已发布版本不受影响。重新打开版本用：
+
+```python
+bundle = store.load_run(out_dir, source_matrix=load_matrix("counts.csv", "batches.csv"))
+bundle["cell_ids"]          # 每个保留对象都能逐一对回来源
+bundle["batch_of_cell"]
+```
+
+来源矩阵内容变化（指纹不一致）或版本内身份被破坏时，`load_run` 同样抛出
+`PublishRejected` 并给出全部不匹配说明。结果行顺序变化不影响身份核对。
 
 ## 演示与测试
 
