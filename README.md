@@ -14,6 +14,13 @@
 - 发布前强制核对：结果中的细胞、基因、批次关系必须与来源矩阵一致，
   非法身份、重复身份、批次错配都会以 `PublishRejectedError` 整次拒绝，
   不留下任何部分版本；`store.verify_version(...)` 可在重开后逐细胞复核。
+- 多批次联合分析集：批次间基因集合可重叠但不完全相同；缺测（该批次
+  未测量的基因）以 NaN + `observed=False` 明确标注，绝不解释成零表达。
+  可选 intersection（只用共同基因）或 union（保留全部基因并记录每个
+  批次的缺测范围），`compare_join_modes(...)` 并行比较两种选择对保留
+  细胞与质量判断的影响。同显示名的细胞按来源区分（`<批次>::<细胞>`），
+  批次补测基因会生成新联合版本而不覆盖旧分析；撤回一个批次只影响
+  依赖它的联合结果。
 
 ## 依赖
 
@@ -112,6 +119,40 @@ out_dir = store.save_run(
 
 核对方式：重新载入原始矩阵后比较 `input_identity.json` 中的摘要即可；
 文件改名不影响指纹，任何计数或身份改动都会让摘要变化并产生新版本。
+
+## 联合分析集
+
+```python
+from scplatform import join_batches, compare_join_modes, qc_on_joint
+
+batches = {"batchA": matrix_a, "batchB": matrix_b}  # 各自基因集合可不同
+
+# 两种联合选择的并行比较：保留细胞差异、缺测范围
+comparison = compare_join_modes(batches, qc_params)
+print(comparison.entered_ids)        # 仅 union 保留的细胞（联合键）
+print(comparison.missing_by_batch)   # 每个批次缺测的基因清单
+
+# 选择 union 保存联合版本
+joint = join_batches(batches, mode="union")   # 或 "intersection"
+out = store.save_joint(sources=batches, joint=joint, params=params,
+                       qc_report=qc_on_joint(joint, qc_params).to_dict(),
+                       comparison=comparison.to_dict())
+```
+
+联合版本位于 `results/versions/jNNNN_<sources_hash>_<param_hash>/`：
+
+- `joint.npz`：`values`（缺测为 NaN）、`observed` 掩码、联合细胞键
+  （`<批次>::<细胞>`，同显示名按来源区分）、显示名、基因顺序、批次归属。
+- `joint_identity.json`：联合模式、每个来源批次的内容指纹、细胞/基因
+  顺序、每个批次的缺测基因清单。
+- 发布前核对：联合结果的细胞、基因顺序与缺测掩码必须与由来源矩阵
+  重新联合的结果逐值一致，否则整次拒绝，不留下混杂版本。
+- 批次补测基因后内容指纹改变，`save_joint` 自动生成新版本，旧版本
+  只读保留；相同来源 + 相同参数重存是幂等的。
+- `store.verify_joint(version_dir, sources)` 重开后逐细胞、逐基因复核，
+  并报告 `withdrawn_dependencies`；`store.withdraw_batch(name)` 撤回
+  一个批次后，依赖它的联合版本状态变为 `withdrawn_dependency`，
+  不依赖它的版本不受影响。
 
 ## 演示与测试
 

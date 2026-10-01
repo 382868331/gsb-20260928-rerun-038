@@ -6,6 +6,14 @@ from .normalize import NormalizeParams, normalize
 from .compare import CellChange, QCComparison, compare_qc
 from .store import PublishRejectedError, ResultStore, validate_result_identities
 from .io import load_matrix
+from .joint import (
+    JoinModeComparison,
+    JointMatrix,
+    JointQCReport,
+    compare_join_modes,
+    join_batches,
+    qc_on_joint,
+)
 
 __all__ = [
     "CountMatrix",
@@ -21,4 +29,10 @@ __all__ = [
     "PublishRejectedError",
     "validate_result_identities",
     "load_matrix",
+    "JointMatrix",
+    "JointQCReport",
+    "JoinModeComparison",
+    "join_batches",
+    "qc_on_joint",
+    "compare_join_modes",
 ]

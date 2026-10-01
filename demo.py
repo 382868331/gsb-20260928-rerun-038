@@ -10,11 +10,16 @@ from scplatform import (
     NormalizeParams,
     QCParams,
     ResultStore,
+    compare_join_modes,
     compare_qc,
     filter_cells,
+    join_batches,
     normalize,
+    qc_on_joint,
 )
+from scplatform import CountMatrix
 from scplatform.toydata import make_toy_matrix
+import numpy as np
 
 RESULTS = Path("results")
 
@@ -103,6 +108,74 @@ def main() -> None:
     print(f"\n共 {len(versions)} 个版本:")
     for v in versions:
         print(" -", v.name)
+
+    demo_joint(store)
+
+
+def demo_joint(store: ResultStore) -> None:
+    """联合分析集演示：基因集合不同的批次联合、模式比较、补测与撤回。"""
+    print("\n=== 联合分析集 ===")
+    batches = {
+        "batchA": CountMatrix(
+            counts=np.array([[600, 300, 100], [10, 5, 0]], dtype=np.int64),
+            cell_ids=("cell_a1", "cell_a2"),
+            gene_ids=("GeneA", "GeneB", "GeneC"),
+            batch_of_cell=("batchA", "batchA"),
+        ),
+        "batchB": CountMatrix(
+            # 与 batchA 基因集合重叠但不同（无 GeneA，多 GeneD），
+            # 且有同显示名细胞 cell_a1 —— 按来源区分，绝不合并
+            counts=np.array([[40, 30, 20, 10], [30, 20, 0, 0]], dtype=np.int64),
+            cell_ids=("cell_a1", "cell_b2"),
+            gene_ids=("GeneB", "GeneC", "GeneD", "GeneE"),
+            batch_of_cell=("batchB", "batchB"),
+        ),
+    }
+    qc = {
+        "batchA": QCParams(min_total_counts=50, min_detected_genes=3),
+        "batchB": QCParams(min_total_counts=50, min_detected_genes=3),
+    }
+
+    # 两种联合选择对保留细胞的影响
+    comparison = compare_join_modes(batches, qc)
+    print("[joint] 共同基因数:", comparison.n_genes_intersection,
+          "全部基因数:", comparison.n_genes_union)
+    print("[joint] 各批次缺测基因:", comparison.missing_by_batch)
+    print("[joint] 仅 union 保留:", comparison.entered_ids)
+    print("[joint] 仅 intersection 保留:", comparison.left_ids)
+
+    # 保存 union 联合版本：缺测为 NaN + observed=False，绝不当作零表达
+    joint = join_batches(batches, mode="union")
+    report = qc_on_joint(joint, qc)
+    out = store.save_joint(
+        sources=batches,
+        joint=joint,
+        params={"qc": {b: p.to_dict() for b, p in qc.items()}},
+        qc_report=report.to_dict(),
+        comparison=comparison.to_dict(),
+    )
+    print("[joint] 联合版本已保存 ->", out.name)
+    info = store.verify_joint(out, batches)
+    print("[joint] 重开核对:", info["status"], "缺测说明:", info["missing_by_batch"])
+
+    # batchB 补测 GeneA -> 新联合版本，旧版本保留
+    old = batches["batchB"]
+    batches_v2 = dict(batches)
+    batches_v2["batchB"] = CountMatrix(
+        counts=np.column_stack([old.counts, [5, 0]]),
+        cell_ids=old.cell_ids,
+        gene_ids=old.gene_ids + ("GeneA",),
+        batch_of_cell=old.batch_of_cell,
+    )
+    joint_v2 = join_batches(batches_v2, mode="union")
+    out_v2 = store.save_joint(sources=batches_v2, joint=joint_v2,
+                              params={"qc": {b: p.to_dict() for b, p in qc.items()}})
+    print("[joint] 补测后生成新版本 ->", out_v2.name, "（旧版本保留）")
+
+    # 撤回 batchA：只影响依赖它的联合结果
+    affected = store.withdraw_batch("batchA")
+    print("[joint] 撤回 batchA，受影响版本:", affected)
+    print("[joint] 旧版本状态:", store.verify_joint(out, batches)["status"])
 
 
 if __name__ == "__main__":
