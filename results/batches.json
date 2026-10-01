@@ -1,0 +1,10 @@
+{
+  "batchA": {
+    "fingerprint": "c188356d06bb84671b6c51f221bc8f4dcc5d13739c4edbc7a68c2279e4995916",
+    "status": "active"
+  },
+  "batchB": {
+    "fingerprint": "68f1b8460193757488b25d1c510ec43221996d3327c6056b69a122b9325a8792",
+    "status": "withdrawn"
+  }
+}

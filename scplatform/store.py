@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .joint import JointMatrix, join_batches
 from .model import CountMatrix
 
 
@@ -235,6 +236,245 @@ class ResultStore:
             ),
             encoding="utf-8",
         )
+    # ---------------- 联合分析集：保存、核对、批次撤回 ----------------
+
+    @property
+    def joints_dir(self) -> Path:
+        path = self.root / "joints"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def _batch_registry_path(self) -> Path:
+        return self.root / "batches.json"
+
+    def _load_registry(self) -> dict:
+        if self._batch_registry_path.exists():
+            return json.loads(self._batch_registry_path.read_text(encoding="utf-8"))
+        return {}
+
+    def _save_registry(self, registry: dict) -> None:
+        self._batch_registry_path.write_text(
+            json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    @staticmethod
+    def _joint_source_hash(joint: JointMatrix) -> str:
+        payload = {
+            "mode": joint.mode,
+            "sources": joint.source_fingerprints,
+        }
+        return ResultStore._hash(payload)
+
+    def save_joint(
+        self,
+        *,
+        joint: JointMatrix,
+        sources: dict[str, CountMatrix],
+        params: dict,
+    ) -> Path:
+        """保存联合分析集为不可覆盖的新版本。
+
+        发布前核对：joint 中采用的细胞、基因顺序、缺测说明必须与
+        sources 中的实际矩阵重新联合的结果一致；任何不一致或写入
+        中途失败都整次拒绝，不留下混杂的部分版本。
+        批次后来补测基因时来源指纹变化，自动生成新版本而非覆盖。
+        """
+        self._validate_joint(joint, sources)
+
+        source_hash = self._joint_source_hash(joint)[:12]
+        param_hash = self._hash(params)[:12]
+        version_key = f"{source_hash}_{param_hash}"
+        for existing in self.list_joints():
+            if existing.name.split("_", 1)[1] == version_key:
+                return existing  # 相同来源+参数：幂等复用
+
+        next_id = self._next_joint_no()
+        out_dir = self.joints_dir / f"j{next_id:04d}_{version_key}"
+        if out_dir.exists():
+            raise RuntimeError(f"联合结果目录已存在，拒绝覆盖: {out_dir}")
+        staging = self.joints_dir / f".staging-j{next_id:04d}-{os.getpid()}"
+        staging.mkdir()
+        try:
+            self._write_joint_staging(staging, joint, params)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        staging.rename(out_dir)
+        for path in [*out_dir.rglob("*"), out_dir]:
+            if path.is_file():
+                path.chmod(0o444)
+
+        # 登记来源批次（补测后指纹更新，撤回状态不受影响）
+        registry = self._load_registry()
+        for batch, fingerprint in joint.source_fingerprints.items():
+            entry = registry.get(batch, {})
+            registry[batch] = {
+                "fingerprint": fingerprint,
+                "status": entry.get("status", "active"),
+            }
+        self._save_registry(registry)
+        return out_dir
+
+    @staticmethod
+    def _validate_joint(joint: JointMatrix, sources: dict[str, CountMatrix]) -> None:
+        """发布前核对：采用细胞、基因顺序、缺测说明与实际矩阵一致。"""
+        reasons: list[str] = []
+        if set(joint.source_fingerprints) != set(sources):
+            reasons.append(
+                f"联合来源批次 {sorted(joint.source_fingerprints)} 与提供的"
+                f"实际矩阵 {sorted(sources)} 不一致"
+            )
+        if reasons:
+            raise PublishRejectedError(reasons)
+        for batch, matrix in sources.items():
+            actual = matrix.content_fingerprint()
+            if joint.source_fingerprints[batch] != actual:
+                reasons.append(f"批次 {batch} 的来源指纹与实际矩阵不符")
+        if not reasons:
+            # 用实际矩阵重新联合，逐项核对采用细胞、基因顺序与缺测掩码
+            expected = join_batches(sources, joint.mode)
+            if list(joint.gene_ids) != list(expected.gene_ids):
+                reasons.append("联合结果的基因顺序与实际矩阵重新联合的结果不一致")
+            expected_rows = {k: i for i, k in enumerate(expected.cell_keys)}
+            unknown = [k for k in joint.cell_keys if k not in expected_rows]
+            if unknown:
+                reasons.append(f"联合结果含来源中不存在的细胞: {unknown}")
+            for i, key in enumerate(joint.cell_keys):
+                if key not in expected_rows:
+                    continue
+                exp = expected_rows[key]
+                if joint.batch_of_cell[i] != expected.batch_of_cell[exp]:
+                    reasons.append(f"细胞 {key} 的批次归属与实际矩阵错配")
+                if not np.array_equal(joint.measured[i], expected.measured[exp]):
+                    reasons.append(f"细胞 {key} 的缺测说明与实际矩阵不一致")
+                elif not np.allclose(
+                    joint.values[i][joint.measured[i]],
+                    expected.values[exp][expected.measured[exp]],
+                ):
+                    reasons.append(f"细胞 {key} 的测量值与实际矩阵不一致")
+        if reasons:
+            raise PublishRejectedError(reasons)
+
+    def _write_joint_staging(
+        self, staging: Path, joint: JointMatrix, params: dict
+    ) -> None:
+        (staging / "params.json").write_text(
+            json.dumps(params, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        (staging / "joint_report.json").write_text(
+            json.dumps(joint.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        np.savez_compressed(
+            staging / "joint.npz",
+            values=joint.values,
+            measured=joint.measured,
+            cell_keys=np.array(joint.cell_keys),
+            display_names=np.array(joint.display_names),
+            batch_of_cell=np.array(joint.batch_of_cell),
+            gene_ids=np.array(joint.gene_ids),
+        )
+        (staging / "meta.json").write_text(
+            json.dumps(
+                {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "kind": "joint",
+                    "mode": joint.mode,
+                    "source_fingerprints": dict(joint.source_fingerprints),
+                    "source_hash": self._joint_source_hash(joint)[:12],
+                    "param_hash": self._hash(params)[:12],
+                    "n_cells": joint.n_cells,
+                    "n_genes": joint.n_genes,
+                    "published": True,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    def _next_joint_no(self) -> int:
+        existing = []
+        for p in self.list_joints():
+            try:
+                existing.append(int(p.name.split("_", 1)[0][1:]))
+            except (ValueError, IndexError):
+                continue
+        return (max(existing) if existing else 0) + 1
+
+    def list_joints(self) -> list[Path]:
+        joints_dir = self.root / "joints"
+        if not joints_dir.exists():
+            return []
+        return sorted(p for p in joints_dir.glob("j*") if p.is_dir())
+
+    def withdraw_batch(self, batch: str) -> list[str]:
+        """撤回一个批次；只有依赖它的联合结果被标记为失效，其余不受影响。
+
+        返回受影响的联合版本目录名列表。
+        """
+        registry = self._load_registry()
+        entry = registry.get(batch, {"fingerprint": None})
+        entry["status"] = "withdrawn"
+        registry[batch] = entry
+        self._save_registry(registry)
+        return [v.name for v in self.list_joints() if batch in self._joint_dependencies(v)]
+
+    @staticmethod
+    def _joint_dependencies(version_dir: Path) -> dict[str, str]:
+        meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
+        return meta.get("source_fingerprints", {})
+
+    def joint_status(self, version_dir: str | Path) -> str:
+        """联合版本状态：ok / withdrawn:<批次>（依赖批次被撤回）。"""
+        registry = self._load_registry()
+        for batch in self._joint_dependencies(Path(version_dir)):
+            if registry.get(batch, {}).get("status") == "withdrawn":
+                return f"withdrawn:{batch}"
+        return "ok"
+
+    def load_joint(self, version_dir: str | Path) -> JointMatrix:
+        """重开已保存的联合版本，恢复每个细胞与每组测量的完整记录。"""
+        version_dir = Path(version_dir)
+        meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
+        with np.load(version_dir / "joint.npz", allow_pickle=False) as data:
+            return JointMatrix(
+                values=data["values"],
+                measured=data["measured"],
+                cell_keys=tuple(str(c) for c in data["cell_keys"]),
+                display_names=tuple(str(c) for c in data["display_names"]),
+                batch_of_cell=tuple(str(b) for b in data["batch_of_cell"]),
+                gene_ids=tuple(str(g) for g in data["gene_ids"]),
+                mode=meta["mode"],
+                source_fingerprints=meta["source_fingerprints"],
+            )
+
+    def verify_joint(
+        self, version_dir: str | Path, sources: dict[str, CountMatrix]
+    ) -> dict:
+        """重开联合版本并逐项核对：身份、缺测说明与实际矩阵一致，
+        且依赖批次均未被撤回；任何问题都抛出 PublishRejectedError。"""
+        version_dir = Path(version_dir)
+        problems: list[str] = []
+        status = self.joint_status(version_dir)
+        if status != "ok":
+            problems.append(f"依赖批次已被撤回，联合结果失效: {status}")
+        joint = self.load_joint(version_dir)
+        try:
+            self._validate_joint(joint, sources)
+        except PublishRejectedError as exc:
+            problems.extend(exc.reasons)
+        if problems:
+            raise PublishRejectedError(problems)
+        return {
+            "version": version_dir.name,
+            "mode": joint.mode,
+            "status": status,
+            "cell_keys": list(joint.cell_keys),
+            "gene_ids": list(joint.gene_ids),
+            "missing_genes_by_batch": joint.missing_genes_by_batch(),
+        }
+
     def find_version(self, matrix: CountMatrix, params: dict) -> Path | None:
         """按输入内容+参数精确定位已发布版本；内容不同不会命中。"""
         version_key = f"{matrix.content_fingerprint()[:12]}_{self._hash(params)[:12]}"

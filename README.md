@@ -98,6 +98,34 @@ out_dir = store.save_run(
 )
 ```
 
+
+## 跨批次联合分析集
+
+不同采集批次可以合并为一个联合分析集，基因允许重叠但不完全相同：
+
+- 每个值都带 `measured` 掩码：`True` 为真实测量，`False` 为该批次未测；
+  缺测位置以 NaN 存储，**绝不把缺测解释成零表达**（真实零计数仍是测量值 0）。
+- `join_batches(sources, "common")` 只用共同基因；`"union"` 保留全部基因，
+  `missing_genes_by_batch()` 明确每个批次的缺测范围。
+- `compare_join_modes(sources, qc)` 比较两种选择对保留细胞与质量判断的影响
+  （共同基因更少时检出基因数阈值可能误判，差异逐细胞列出）。
+- 细胞显示名相同仍按来源区分：内部身份为 `批次::细胞ID`，绝不按显示名合并。
+- `store.save_joint(joint=..., sources=..., params=...)` 发布前用实际矩阵重新
+  联合核对：采用细胞、基因顺序、缺测说明任一不符都整次拒绝，不留下混杂版本；
+  批次补测基因后来源指纹变化，自动生成新联合版本而不覆盖旧分析。
+- `store.load_joint(...)` / `store.verify_joint(...)` 重开后逐细胞、逐组测量
+  追溯核对；`store.withdraw_batch(name)` 撤回批次只把依赖它的联合版本标记
+  失效，其余版本不受影响。
+
+```python
+from scplatform import join_batches, compare_join_modes
+
+sources = {"batchA": matrix_a, "batchB": matrix_b}  # 各自批次的 CountMatrix
+joint = join_batches(sources, "union")
+comparison = compare_join_modes(sources, qc_params)
+out = store.save_joint(joint=joint, sources=sources, params={"note": "v1"})
+```
+
 ## 结果目录与来源核对
 
 每个版本位于 `results/versions/vNNNN_<input_hash>_<param_hash>/`：

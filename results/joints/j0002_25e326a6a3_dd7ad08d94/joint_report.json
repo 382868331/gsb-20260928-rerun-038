@@ -1,0 +1,51 @@
+{
+  "mode": "union",
+  "n_cells": 4,
+  "n_genes": 4,
+  "gene_ids": [
+    "GeneA",
+    "GeneB",
+    "GeneC",
+    "GeneD"
+  ],
+  "batches": [
+    "batchA",
+    "batchB"
+  ],
+  "missing_genes_by_batch": {
+    "batchA": [
+      "GeneD"
+    ],
+    "batchB": []
+  },
+  "source_fingerprints": {
+    "batchA": "c188356d06bb84671b6c51f221bc8f4dcc5d13739c4edbc7a68c2279e4995916",
+    "batchB": "68f1b8460193757488b25d1c510ec43221996d3327c6056b69a122b9325a8792"
+  },
+  "cells": [
+    {
+      "cell_key": "batchA::cell_1",
+      "display_name": "cell_1",
+      "batch": "batchA",
+      "n_measured_genes": 3
+    },
+    {
+      "cell_key": "batchA::cell_2",
+      "display_name": "cell_2",
+      "batch": "batchA",
+      "n_measured_genes": 3
+    },
+    {
+      "cell_key": "batchB::cell_1",
+      "display_name": "cell_1",
+      "batch": "batchB",
+      "n_measured_genes": 4
+    },
+    {
+      "cell_key": "batchB::cell_3",
+      "display_name": "cell_3",
+      "batch": "batchB",
+      "n_measured_genes": 4
+    }
+  ]
+}

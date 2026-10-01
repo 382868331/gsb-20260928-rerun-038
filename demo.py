@@ -104,6 +104,65 @@ def main() -> None:
     for v in versions:
         print(" -", v.name)
 
+    demo_joint()
+
+
+
+
+def demo_joint() -> None:
+    """跨批次联合：基因部分重叠、缺测说明、模式比较、补测出新版本。"""
+    import numpy as np
+    from scplatform import CountMatrix, compare_join_modes, join_batches
+
+    print("\n=== 联合分析集演示 ===")
+    sources = {
+        "batchA": CountMatrix(
+            counts=np.array([[600, 300, 100], [800, 100, 50]], dtype=np.int64),
+            cell_ids=("cell_1", "cell_2"),
+            gene_ids=("GeneA", "GeneB", "GeneC"),
+            batch_of_cell=("batchA", "batchA"),
+        ),
+        "batchB": CountMatrix(
+            counts=np.array([[40, 30, 20], [30, 20, 5]], dtype=np.int64),
+            cell_ids=("cell_1", "cell_3"),  # cell_1 同名但不同源
+            gene_ids=("GeneB", "GeneC", "GeneD"),
+            batch_of_cell=("batchB", "batchB"),
+        ),
+    }
+    joint = join_batches(sources, "union")
+    print("[joint] 细胞身份:", joint.cell_keys)
+    print("[joint] 各批次缺测基因:", joint.missing_genes_by_batch())
+
+    qc = {"batchA": QCParams(1, 3), "batchB": QCParams(1, 3)}
+    comparison = compare_join_modes(sources, qc)
+    print("[joint] common 保留:", comparison.common_kept)
+    print("[joint] union 保留:", comparison.union_kept)
+
+    store = ResultStore(RESULTS)
+    out = store.save_joint(joint=joint, sources=sources, params={"note": "joint-v1"})
+    print("[joint] 已保存 ->", out)
+
+    # batchB 补测 GeneA：来源指纹变化 -> 新联合版本，旧版本不覆盖
+    old_b = sources["batchB"]
+    sources2 = {
+        "batchA": sources["batchA"],
+        "batchB": CountMatrix(
+            counts=np.array([[40, 30, 20, 9], [30, 20, 5, 7]], dtype=np.int64),
+            cell_ids=old_b.cell_ids,
+            gene_ids=("GeneB", "GeneC", "GeneD", "GeneA"),
+            batch_of_cell=old_b.batch_of_cell,
+        ),
+    }
+    out2 = store.save_joint(
+        joint=join_batches(sources2, "union"), sources=sources2, params={"note": "joint-v1"}
+    )
+    assert out2 != out, "补测后必须生成新联合版本"
+    print("[joint] 补测后新版本 ->", out2)
+
+    # 撤回 batchB：只影响依赖它的联合结果
+    affected = store.withdraw_batch("batchB")
+    print("[joint] 撤回 batchB 影响版本:", affected, "状态:", store.joint_status(out2))
+
 
 if __name__ == "__main__":
     main()

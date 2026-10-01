@@ -1,0 +1,14 @@
+{
+  "created_at": "2026-10-01T18:34:20.966401+00:00",
+  "kind": "joint",
+  "mode": "union",
+  "source_fingerprints": {
+    "batchA": "c188356d06bb84671b6c51f221bc8f4dcc5d13739c4edbc7a68c2279e4995916",
+    "batchB": "68f1b8460193757488b25d1c510ec43221996d3327c6056b69a122b9325a8792"
+  },
+  "source_hash": "25e326a6a3",
+  "param_hash": "dd7ad08d94",
+  "n_cells": 4,
+  "n_genes": 4,
+  "published": true
+}
