@@ -126,6 +126,72 @@ comparison = compare_join_modes(sources, qc_params)
 out = store.save_joint(joint=joint, sources=sources, params={"note": "v1"})
 ```
 
+## 同细胞多模态关联（基因表达 × 蛋白）
+
+两个采集表的细胞集合不必相同，显示名也可能重复；关联只接受有明确
+来源依据的配对：
+
+- `suggest_pairing(modalities, candidate_keys=None)` 按**稳定细胞身份**
+  （共享条码/孔位，可通过 `candidate_keys` 提供“细胞ID→共享条码”映射）
+  提候选：所有模态唯一命中记为 `shared_key` 自动配对；同一键在某模态
+  命中多个细胞形成一对多候选组，**保持未配对**，绝不按显示名合并；
+  只在部分模态出现的细胞记为 `missing_modality`。重复显示名仅在
+  `pairing.duplicate_display_names` 中登记核对。
+- `pairing.with_resolved(group_id, {模态: 选中的细胞ID}, decided_by=...)`
+  做人工选择：选择必须来自候选快照（来源不明的细胞直接拒绝），决定以
+  `evidence="explicit"` 连同候选人与选择人一并保存。旧 `Pairing`
+  不被改写，因此重新选择后旧联合版本依旧可解释。
+- `ModalityMatrix` 为每个模态保留自己的字段（基因/蛋白）顺序、逐字段
+  单位（如 counts / CLR）和 `measurement_version`。模态表内的零是
+  **真实测得的零**；某行整模态缺测在联合矩阵中是 NaN 且 `measured=False`，
+  两者严格区分，缺测绝不计作零。
+- 两种分析范围可比较：`compare_scopes(...)` 分别给出只含已配对细胞的
+  `paired` 范围与保留所有细胞的 `all` 范围，逐细胞标明缺少哪种测量，
+  并列出范围选择对保留/剔除判断的影响。
+- `store.save_multimodal(...)` 发布前用实际测量表按配对决定重新构造
+  联合矩阵核对：行集合、各模态字段顺序、单位、测量版本、缺测掩码或
+  测量值不符都以 `PublishRejectedError` 整次拒绝；相同输入幂等复用，
+  补测或重新选择产生新版本而不覆盖旧版本。`load_multimodal` /
+  `load_pairing` / `verify_multimodal` 支持发布中断后重开，矩阵范围、
+  配对决定与缺测说明保持一致。
+- `store.register_downstream_screen(...)` 登记基于某联合版本的下游筛选；
+  `withdraw_association(version, pair_cell_id)` 撤回单条关联、
+  `withdraw_modality(name)` 撤回整个采集批次（或 `fingerprint=` 指定
+  补测版本）、`remeasure_modality(...)` 登记补测；这些操作返回
+  `affected_multimodal_versions` 与 `affected_downstream_screens` 清单，
+  未依赖该资料的测量与版本不受牵连。
+
+```python
+from scplatform import (
+    ModalityMatrix, ModalityQCParams, ResultStore,
+    suggest_pairing, build_multimodal, compare_scopes,
+)
+
+rna = ModalityMatrix(values=rna_values, cell_ids=("bc1", "bc2"),
+                     feature_ids=("GeneA", "GeneB"), modality="rna",
+                     units=("counts", "counts"), measurement_version="rna-2026-09")
+protein = ModalityMatrix(values=prot_values, cell_ids=("pA", "pB"),
+                         feature_ids=("CD3", "CD19"), modality="protein",
+                         units=("CLR", "CLR"), measurement_version="prot-2026-09")
+keys = {"rna": {...}, "protein": {"pA": "bc1", ...}}
+
+pairing = suggest_pairing({"rna": rna, "protein": protein}, keys)
+for group in pairing.ambiguous:          # 一对多候选由人工选择
+    pairing = pairing.with_resolved(group.group_id, choice, decided_by="alice")
+
+multi = build_multimodal({"rna": rna, "protein": protein}, pairing)
+impact = compare_scopes(
+    {"rna": rna, "protein": protein}, pairing,
+    {"rna": ModalityQCParams(), "protein": ModalityQCParams()},
+).to_dict()  # paired 与 all 两种范围的筛选与缺测差异
+
+store = ResultStore("results")
+version = store.save_multimodal(
+    multi=multi, modalities={"rna": rna, "protein": protein},
+    pairing=pairing, params={"scope": "paired"},
+)
+```
+
 ## 结果目录与来源核对
 
 每个版本位于 `results/versions/vNNNN_<input_hash>_<param_hash>/`：

@@ -14,6 +14,20 @@ from .joint import (
     compare_join_modes,
     join_batches,
 )
+from .modality import ModalityMatrix
+from .multimodal import (
+    SCOPES,
+    ModalityQCParams,
+    MultimodalMatrix,
+    Pairing,
+    PairRecord,
+    AmbiguousGroup,
+    ScopeComparison,
+    build_multimodal,
+    compare_scopes,
+    multimodal_cell_id,
+    suggest_pairing,
+)
 
 __all__ = [
     "CountMatrix",
@@ -35,4 +49,16 @@ __all__ = [
     "cell_key",
     "join_batches",
     "compare_join_modes",
+    "ModalityMatrix",
+    "SCOPES",
+    "ModalityQCParams",
+    "MultimodalMatrix",
+    "Pairing",
+    "PairRecord",
+    "AmbiguousGroup",
+    "ScopeComparison",
+    "build_multimodal",
+    "compare_scopes",
+    "multimodal_cell_id",
+    "suggest_pairing",
 ]

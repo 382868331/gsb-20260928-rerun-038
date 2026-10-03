@@ -17,6 +17,14 @@ import numpy as np
 
 from .joint import JointMatrix, join_batches
 from .model import CountMatrix
+from .multimodal import (
+    MultimodalMatrix,
+    MultimodalRow,
+    Pairing,
+    build_multimodal,
+    multimodal_cell_id,
+)
+from .modality import ModalityMatrix
 
 
 class PublishRejectedError(ValueError):
@@ -526,4 +534,410 @@ class ResultStore:
             "kept_cell_ids": cell_ids,
             "gene_ids": gene_ids,
             "batch_of_cell": batch_of_cell,
+        }
+
+    # ---------------- 多模态关联：保存、核对、撤回、影响分析 ----------------
+
+    @property
+    def multimodal_dir(self) -> Path:
+        path = self.root / "multimodal"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def _modality_registry_path(self) -> Path:
+        return self.root / "modalities.json"
+
+    @property
+    def _downstream_registry_path(self) -> Path:
+        return self.root / "downstream.json"
+
+    def _load_json(self, path: Path) -> dict:
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        return {}
+
+    @staticmethod
+    def _multimodal_hash(pairing: Pairing, params: dict) -> str:
+        payload = {
+            "modality_fingerprints": pairing.modality_fingerprints,
+            "pairs": [p.to_dict() for p in sorted(pairing.pairs, key=lambda r: r.cell_id)],
+            "unpaired": [dict(u) for u in sorted(pairing.unpaired, key=json.dumps)],
+        }
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode()
+        ).hexdigest()[:10] + "_" + ResultStore._hash(params)[:10]
+
+    def list_multimodal(self) -> list[Path]:
+        root = self.root / "multimodal"
+        if not root.exists():
+            return []
+        return sorted(p for p in root.glob("m*") if p.is_dir())
+
+    def _next_multimodal_no(self) -> int:
+        nums = []
+        for p in self.list_multimodal():
+            try:
+                nums.append(int(p.name.split("_", 1)[0][1:]))
+            except (ValueError, IndexError):
+                continue
+        return (max(nums) if nums else 0) + 1
+
+    def _validate_multimodal(
+        self,
+        multi: MultimodalMatrix,
+        modalities: dict[str, ModalityMatrix],
+        pairing: Pairing,
+    ) -> None:
+        """发布前用实际测量表重新构造联合矩阵并逐项核对。"""
+        reasons: list[str] = []
+        if set(pairing.modalities) != set(modalities):
+            reasons.append(
+                f"配对模态 {list(pairing.modalities)} 与实际测量表 "
+                f"{sorted(modalities)} 不一致"
+            )
+        for name, table in modalities.items():
+            if pairing.modality_fingerprints.get(name) != table.content_fingerprint():
+                reasons.append(
+                    f"模态 {name} 的来源指纹与实际测量表不符（补测/改动需先重新关联）"
+                )
+        if reasons:
+            raise PublishRejectedError(reasons)
+        expected = build_multimodal(modalities, pairing)
+        if [r.row_id for r in multi.rows] != [r.row_id for r in expected.rows]:
+            reasons.append("联合矩阵行集合/顺序与按配对决定重新构造的结果不一致")
+        for name in modalities:
+            if multi.feature_ids[name] != expected.feature_ids[name]:
+                reasons.append(f"模态 {name} 的字段顺序与实际测量表不一致")
+            if multi.units[name] != expected.units[name]:
+                reasons.append(f"模态 {name} 的单位与实际测量表不一致")
+            if multi.measurement_versions[name] != expected.measurement_versions[name]:
+                reasons.append(f"模态 {name} 的测量版本与实际测量表不一致")
+            if not np.array_equal(multi.measured[name], expected.measured[name]):
+                reasons.append(f"模态 {name} 的缺测说明与实际配对不一致")
+            else:
+                mask = expected.measured[name]
+                if not np.allclose(
+                    multi.values[name][mask], expected.values[name][mask]
+                ):
+                    reasons.append(f"模态 {name} 的测量值与实际测量表不一致")
+        if reasons:
+            raise PublishRejectedError(reasons)
+
+    def save_multimodal(
+        self,
+        *,
+        multi: MultimodalMatrix,
+        modalities: dict[str, ModalityMatrix],
+        pairing: Pairing,
+        params: dict,
+    ) -> Path:
+        """保存多模态联合版本：内容、字段顺序、单位、版本、配对决定全绑定。
+
+        发布前用实际测量表重新构造核对，任一不符整次拒绝且不留部分版本。
+        补测或重新人工选择都会产生新版本，旧版本目录保持可解释、不被覆盖。
+        """
+        self._validate_multimodal(multi, modalities, pairing)
+
+        version_key = self._multimodal_hash(pairing, params)
+        for existing in self.list_multimodal():
+            if existing.name.split("_", 1)[1] == version_key:
+                return existing
+
+        next_id = self._next_multimodal_no()
+        out_dir = self.multimodal_dir / f"m{next_id:04d}_{version_key}"
+        if out_dir.exists():
+            raise RuntimeError(f"多模态版本目录已存在，拒绝覆盖: {out_dir}")
+        staging = self.multimodal_dir / f".staging-m{next_id:04d}-{os.getpid()}"
+        staging.mkdir()
+        try:
+            (staging / "params.json").write_text(
+                json.dumps(params, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            (staging / "pairing.json").write_text(
+                json.dumps(pairing.to_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (staging / "multimodal_report.json").write_text(
+                json.dumps(multi.to_dict(), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            npz = {
+                "modalities": np.array(list(multi.modalities)),
+                "row_ids": np.array([r.row_id for r in multi.rows]),
+                "row_paired": np.array([r.paired for r in multi.rows]),
+            }
+            for name in multi.modalities:
+                npz[f"values__{name}"] = multi.values[name]
+                npz[f"measured__{name}"] = multi.measured[name]
+                npz[f"features__{name}"] = np.array(multi.feature_ids[name])
+                npz[f"units__{name}"] = np.array(multi.units[name])
+            np.savez_compressed(staging / "multimodal.npz", **npz)
+            (staging / "meta.json").write_text(
+                json.dumps(
+                    {
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "kind": "multimodal",
+                        "modalities": list(multi.modalities),
+                        "feature_ids": {
+                            m: list(v) for m, v in multi.feature_ids.items()
+                        },
+                        "units": {m: list(v) for m, v in multi.units.items()},
+                        "measurement_versions": dict(multi.measurement_versions),
+                        "modality_fingerprints": dict(pairing.modality_fingerprints),
+                        "version_hash": version_key,
+                        "published": True,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        staging.rename(out_dir)
+        for path in [*out_dir.rglob("*"), out_dir]:
+            if path.is_file():
+                path.chmod(0o444)
+
+        registry = self._load_json(self._modality_registry_path)
+        for name, fingerprint in pairing.modality_fingerprints.items():
+            entry = registry.get(name, {})
+            version = entry.get("versions", {})
+            version.setdefault(
+                fingerprint,
+                {"status": "active", "measurement_version": pairing.modality_versions[name]},
+            )
+            entry["versions"] = version
+            entry.setdefault("status", "active")
+            registry[name] = entry
+        self._modality_registry_path.write_text(
+            json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return out_dir
+
+    def load_pairing(self, version_dir: str | Path) -> Pairing:
+        version_dir = Path(version_dir)
+        return Pairing.from_dict(
+            json.loads((version_dir / "pairing.json").read_text(encoding="utf-8"))
+        )
+
+    def load_multimodal(self, version_dir: str | Path) -> MultimodalMatrix:
+        """重开多模态版本：恢复行、各模态字段顺序/单位/版本与缺测说明。"""
+        version_dir = Path(version_dir)
+        meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
+        pairing = self.load_pairing(version_dir)
+        with np.load(version_dir / "multimodal.npz", allow_pickle=False) as data:
+            names = tuple(str(m) for m in data["modalities"])
+            row_ids = tuple(str(r) for r in data["row_ids"])
+            rows = []
+            report = json.loads(
+                (version_dir / "multimodal_report.json").read_text(encoding="utf-8")
+            )
+            report_rows = {r["row_id"]: r for r in report["rows"]}
+            values = {}
+            measured = {}
+            for name in names:
+                values[name] = data[f"values__{name}"]
+                measured[name] = data[f"measured__{name}"]
+            for rid in row_ids:
+                info = report_rows[rid]
+                rows.append(
+                    MultimodalRow(
+                        row_id=rid,
+                        paired=bool(info["paired"]),
+                        modality_cells={k: str(v) for k, v in info["modality_cells"].items()},
+                        display_names={k: str(v) for k, v in info["display_names"].items()},
+                        missing_modalities=tuple(info["missing_modalities"]),
+                        evidence=info["evidence"],
+                        pair_cell_id=info.get("pair_cell_id", ""),
+                    )
+                )
+        return MultimodalMatrix(
+            rows=tuple(rows),
+            modalities=names,
+            feature_ids={m: tuple(meta["feature_ids"][m]) for m in names},
+            units={m: tuple(meta["units"][m]) for m in names},
+            measurement_versions={m: str(v) for m, v in meta["measurement_versions"].items()},
+            values=values,
+            measured=measured,
+            pairing_fingerprints=dict(meta["modality_fingerprints"]),
+        )
+
+    def verify_multimodal(
+        self,
+        version_dir: str | Path,
+        modalities: dict[str, ModalityMatrix],
+    ) -> dict:
+        """重开后逐行逐模态核对，并检查关联是否已被撤回。"""
+        version_dir = Path(version_dir)
+        pairing = self.load_pairing(version_dir)
+        multi = self.load_multimodal(version_dir)
+        problems: list[str] = []
+        status = self.multimodal_status(version_dir)
+        if status != "ok":
+            problems.append(f"关联依赖已撤回，联合结果失效: {status}")
+        try:
+            self._validate_multimodal(multi, modalities, pairing)
+        except PublishRejectedError as exc:
+            problems.extend(exc.reasons)
+        if problems:
+            raise PublishRejectedError(problems)
+        return {
+            "version": version_dir.name,
+            "status": status,
+            "row_ids": [r.row_id for r in multi.rows],
+            "paired_row_ids": [r.row_id for r in multi.rows if r.paired],
+            "scope_summary": multi.scope_summary(),
+        }
+
+    def multimodal_status(self, version_dir: str | Path) -> str:
+        """版本状态：ok / withdrawn_link:<pair> / withdrawn_modality:<name>。"""
+        version_dir = Path(version_dir)
+        meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
+        registry = self._load_json(self._modality_registry_path)
+        for name, fingerprint in meta["modality_fingerprints"].items():
+            entry = registry.get(name, {})
+            if entry.get("status") == "withdrawn":
+                return f"withdrawn_modality:{name}"
+            version_entry = entry.get("versions", {}).get(fingerprint, {})
+            if version_entry.get("status") == "withdrawn":
+                return f"withdrawn_modality:{name}"
+        links = self._load_json_list(self.root / "withdrawn_links.json")
+        pairing = self.load_pairing(version_dir)
+        pair_ids = {p.cell_id for p in pairing.pairs}
+        for link in links:
+            if (link.get("version") == version_dir.name
+                    and link.get("pair_cell_id") in pair_ids):
+                return f"withdrawn_link:{link['pair_cell_id']}"
+        return "ok"
+
+    def withdraw_association(
+        self, version_dir: str | Path, pair_cell_id: str, *, reason: str = ""
+    ) -> dict:
+        """撤回某联合版本中的一条关联（不撤回任何底层测量）。
+
+        只影响真正包含该关联的多模态版本及其下游筛选；未依赖该关联的
+        测量、其他联合结果不受牵连。旧目录不被改写，状态在登记簿中累积。
+        """
+        target = Path(version_dir).name
+        pairing = self.load_pairing(version_dir)
+        if not any(p.cell_id == pair_cell_id for p in pairing.pairs):
+            raise ValueError(f"版本 {target} 中不存在关联 {pair_cell_id!r}")
+        links_path = self.root / "withdrawn_links.json"
+        links = self._load_json_list(links_path)
+        entry = {"version": target, "pair_cell_id": pair_cell_id, "reason": reason}
+        if entry not in links:
+            links.append(entry)
+        links_path.write_text(
+            json.dumps(links, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return self.withdrawal_impact(
+            kind="link", key=f"{target}:{pair_cell_id}"
+        )
+
+    def _load_json_list(self, path: Path) -> list:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return list(data)
+        return []
+
+    def withdraw_modality(self, name: str, fingerprint: str | None = None) -> dict:
+        """撤回一个模态采集批次（或该模态的某个补测版本）。
+
+        fingerprint=None：撤回该模态整批采集；否则只撤回指定测量版本。
+        返回受影响的联合版本与下游筛选清单。
+        """
+        registry = self._load_json(self._modality_registry_path)
+        if name not in registry:
+            raise ValueError(f"未登记的模态采集批次: {name!r}")
+        if fingerprint is None:
+            registry[name]["status"] = "withdrawn"
+        else:
+            versions = registry[name].setdefault("versions", {})
+            if fingerprint not in versions:
+                raise ValueError(f"模态 {name} 下不存在指纹 {fingerprint}")
+            versions[fingerprint]["status"] = "withdrawn"
+        self._modality_registry_path.write_text(
+            json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return self.withdrawal_impact(
+            kind="modality", key=name if fingerprint is None else f"{name}:{fingerprint}"
+        )
+
+    def withdrawal_impact(self, *, kind: str, key: str) -> dict:
+        """列出受撤回影响的多模态版本与下游筛选。"""
+        affected_versions: list[str] = []
+        for version in self.list_multimodal():
+            status = self.multimodal_status(version)
+            if status != "ok":
+                affected_versions.append({"version": version.name, "status": status})
+        affected_names = {v["version"] for v in affected_versions}
+        downstream = self._load_json(self._downstream_registry_path)
+        affected_screens = []
+        for screen, info in downstream.items():
+            if info.get("multimodal_version") in affected_names:
+                affected_screens.append(
+                    {
+                        "screen": screen,
+                        "multimodal_version": info["multimodal_version"],
+                        "status": "stale",
+                    }
+                )
+        return {
+            "withdrawal": {"kind": kind, "key": key},
+            "affected_multimodal_versions": affected_versions,
+            "affected_downstream_screens": affected_screens,
+            "unaffected_note": "未依赖该资料的测量与版本不在列表中，保持有效",
+        }
+
+    def register_downstream_screen(
+        self,
+        screen: str,
+        *,
+        multimodal_version: str | Path,
+        scope: str,
+        description: str = "",
+    ) -> None:
+        """登记一个基于多模态版本的下游筛选，供撤回时做影响分析。"""
+        registry = self._load_json(self._downstream_registry_path)
+        registry[screen] = {
+            "multimodal_version": Path(multimodal_version).name,
+            "scope": scope,
+            "description": description,
+        }
+        self._downstream_registry_path.write_text(
+            json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def remeasure_modality(
+        self, name: str, old_fingerprint: str, new_table: ModalityMatrix
+    ) -> dict:
+        """登记某模态补测：新版本入库；旧版本是否撤回独立决定，默认保留。"""
+        if new_table.modality != name:
+            raise ValueError("补测表的模态名与被补测模态不一致")
+        registry = self._load_json(self._modality_registry_path)
+        if name not in registry:
+            raise ValueError(f"未登记的模态: {name!r}")
+        new_fingerprint = new_table.content_fingerprint()
+        versions = registry[name].setdefault("versions", {})
+        versions.setdefault(
+            new_fingerprint,
+            {"status": "active", "measurement_version": new_table.measurement_version},
+        )
+        if old_fingerprint not in versions:
+            raise ValueError("旧指纹未登记，无法建立补测关系")
+        versions[old_fingerprint].setdefault("superseded_by", new_fingerprint)
+        registry[name]["status"] = "active"
+        self._modality_registry_path.write_text(
+            json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        impact = self.withdrawal_impact(kind="remeasure", key=name)
+        return {
+            "modality": name,
+            "old_fingerprint": old_fingerprint,
+            "new_fingerprint": new_fingerprint,
+            "old_versions_still_interpretable": True,
+            **impact,
         }
