@@ -103,7 +103,7 @@ def test_all_cells_distinguishes_measured_zero_from_entire_missing_modality():
 def test_save_reopen_and_reverify_preserves_identities_order_and_decisions(tmp_path):
     store = ResultStore(tmp_path)
     rna, protein = make_modalities()
-    association = associate_measurements(
+    all_cells = associate_measurements(
         rna,
         protein,
         rna_source="rna_run",
@@ -112,24 +112,54 @@ def test_save_reopen_and_reverify_preserves_identities_order_and_decisions(tmp_p
         manual_pairs=manual_duplicate_pair(),
     )
     params = {"selection": "small-data"}
-    out = store.save_association(
-        association=association, rna=rna, protein=protein, params=params
+    paired_only = associate_measurements(
+        rna,
+        protein,
+        rna_source="rna_run",
+        protein_source="protein_run",
+        mode="paired_only",
+        manual_pairs=manual_duplicate_pair(),
     )
-    reopened = store.load_association(out)
-    assert reopened.row_keys == association.row_keys
-    assert reopened.fields == association.fields
-    assert reopened.rna_cell_keys == association.rna_cell_keys
-    assert reopened.protein_cell_keys == association.protein_cell_keys
-    np.testing.assert_array_equal(reopened.measured, association.measured)
-    np.testing.assert_allclose(
-        reopened.values[reopened.measured], association.values[association.measured]
-    )
-    summary = store.verify_association(out, rna, protein)
-    assert summary["row_keys"] == list(association.row_keys)
-    assert summary["missing_measurement_by_row"] == association.missing_measurement_by_row()
+    first_out = None
+    for association, mode, mode_params in [
+        (all_cells, "all_cells", params),
+        (paired_only, "paired_only", {**params, "mode": "paired_only"}),
+    ]:
+        out = store.save_association(
+            association=association,
+            rna=rna,
+            protein=protein,
+            params=mode_params,
+        )
+        if first_out is None:
+            first_out = out
+        reopened = store.load_association(out)
+        assert reopened.mode == mode
+        assert reopened.row_keys == association.row_keys
+        assert reopened.display_names == association.display_names
+        assert reopened.fields == association.fields
+        assert reopened.rna_cell_keys == association.rna_cell_keys
+        assert reopened.protein_cell_keys == association.protein_cell_keys
+        assert reopened.decisions == association.decisions
+        assert reopened.to_dict()["association_decisions"] == [
+            decision.to_dict() for decision in association.decisions
+        ]
+        assert reopened.to_dict()["fields"] == [
+            list(field) for field in association.fields
+        ]
+        np.testing.assert_array_equal(reopened.measured, association.measured)
+        np.testing.assert_allclose(
+            reopened.values[reopened.measured],
+            association.values[association.measured],
+        )
+        summary = store.verify_association(out, rna, protein)
+        assert summary["row_keys"] == list(association.row_keys)
+        assert summary["missing_measurement_by_row"] == (
+            association.missing_measurement_by_row()
+        )
     assert store.save_association(
-        association=association, rna=rna, protein=protein, params=params
-    ) == out
+        association=all_cells, rna=rna, protein=protein, params=params
+    ) == first_out
 
 
 def test_remeasurement_creates_new_version_without_changing_old_interpretation(tmp_path):
@@ -167,6 +197,10 @@ def test_remeasurement_creates_new_version_without_changing_old_interpretation(t
     old = store.load_association(first)
     assert old.measured.shape == (4, 4)
     assert old.values[0, 1] == 0
+    assert old.decisions == first_association.decisions
+    assert old.to_dict()["association_decisions"] == [
+        decision.to_dict() for decision in first_association.decisions
+    ]
     with pytest.raises(PublishRejectedError, match="测量值"):
         store.verify_association(first, remeasured_rna, protein)
 
@@ -185,13 +219,37 @@ def test_withdraw_association_lists_registered_downstream_filters(tmp_path):
     out = store.save_association(
         association=association, rna=rna, protein=protein, params={}
     )
+    other = associate_measurements(
+        rna,
+        protein,
+        rna_source="rna_run",
+        protein_source="protein_run",
+        mode="paired_only",
+        manual_pairs=manual_duplicate_pair(),
+    )
+    other_out = store.save_association(
+        association=other, rna=rna, protein=protein, params={"mode": "paired_only"}
+    )
     store.register_downstream_filter(
         kind="association",
         version=out.name,
         filter_id="downstream_filter_1",
         details={"kept_rows": association.row_keys[:2]},
     )
-    assert store.withdraw_association(out) == ["downstream_filter_1"]
+    store.register_downstream_filter(
+        kind="association",
+        version=out.name,
+        filter_id="downstream_filter_2",
+    )
+    store.register_downstream_filter(
+        kind="association",
+        version=other_out.name,
+        filter_id="unrelated_filter",
+    )
+    assert store.withdraw_association(out) == [
+        "downstream_filter_1",
+        "downstream_filter_2",
+    ]
     with pytest.raises(PublishRejectedError, match="关联已撤回"):
         store.verify_association(out, rna, protein)
 

@@ -656,6 +656,12 @@ class ResultStore:
     def load_association(self, version_dir: str | Path) -> MeasurementAssociation:
         version_dir = Path(version_dir)
         meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
+        decision_items = meta.get("association_decisions")
+        if decision_items is None:
+            report = json.loads(
+                (version_dir / "association_report.json").read_text(encoding="utf-8")
+            )
+            decision_items = report["association_decisions"]
         with np.load(version_dir / "association.npz", allow_pickle=False) as data:
             return MeasurementAssociation(
                 values=data["values"],
@@ -677,7 +683,7 @@ class ResultStore:
                     (str(v) for v in data["field_feature"]),
                 )),
                 mode=meta["mode"],
-                decisions=tuple(),
+                decisions=tuple(AssociationDecision(**item) for item in decision_items),
                 rna_source=meta["rna_source"],
                 protein_source=meta["protein_source"],
                 source_fingerprints=meta["source_fingerprints"],
@@ -692,28 +698,11 @@ class ResultStore:
     ) -> dict:
         version_dir = Path(version_dir)
         loaded = self.load_association(version_dir)
-        meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
-        decisions = tuple(AssociationDecision(**item) for item in meta["association_decisions"])
-        association = MeasurementAssociation(
-            values=loaded.values,
-            measured=loaded.measured,
-            row_keys=loaded.row_keys,
-            display_names=loaded.display_names,
-            rna_cell_keys=loaded.rna_cell_keys,
-            protein_cell_keys=loaded.protein_cell_keys,
-            fields=loaded.fields,
-            mode=loaded.mode,
-            decisions=decisions,
-            rna_source=loaded.rna_source,
-            protein_source=loaded.protein_source,
-            source_fingerprints=loaded.source_fingerprints,
-            batches=loaded.batches,
-        )
         problems = []
         if self.association_status(version_dir) != "ok":
             problems.append(f"关联已撤回: {self.association_status(version_dir)}")
         try:
-            self._validate_association(association, rna, protein)
+            self._validate_association(loaded, rna, protein)
         except PublishRejectedError as exc:
             problems.extend(exc.reasons)
         if problems:
@@ -721,9 +710,9 @@ class ResultStore:
         return {
             "version": version_dir.name,
             "status": "ok",
-            "row_keys": list(association.row_keys),
-            "fields": [list(field) for field in association.fields],
-            "missing_measurement_by_row": association.missing_measurement_by_row(),
+            "row_keys": list(loaded.row_keys),
+            "fields": [list(field) for field in loaded.fields],
+            "missing_measurement_by_row": loaded.missing_measurement_by_row(),
         }
 
     def _load_association_registry(self) -> dict:
