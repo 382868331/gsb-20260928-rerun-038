@@ -15,6 +15,11 @@ from pathlib import Path
 
 import numpy as np
 
+from .association import (
+    AssociationDecision,
+    MeasurementAssociation,
+    associate_measurements,
+)
 from .joint import JointMatrix, join_batches
 from .model import CountMatrix
 
@@ -482,6 +487,313 @@ class ResultStore:
             if existing.name.split("_", 1)[1] == version_key:
                 return existing
         return None
+
+    # ------------- RNA/蛋白关联：保存、重开、撤回与下游影响 -------------
+
+    @property
+    def associations_dir(self) -> Path:
+        path = self.root / "associations"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def _downstream_path(self) -> Path:
+        return self.root / "downstream_filters.json"
+
+    @staticmethod
+    def _association_hash(association: MeasurementAssociation) -> str:
+        payload = {
+            "mode": association.mode,
+            "rna_source": association.rna_source,
+            "protein_source": association.protein_source,
+            "sources": association.source_fingerprints,
+            "decisions": [decision.to_dict() for decision in association.decisions],
+        }
+        return ResultStore._hash(payload)
+
+    def save_association(
+        self,
+        *,
+        association: MeasurementAssociation,
+        rna: CountMatrix,
+        protein: CountMatrix,
+        params: dict,
+    ) -> Path:
+        self._validate_association(association, rna, protein)
+        source_hash = self._association_hash(association)[:12]
+        param_hash = self._hash(params)[:12]
+        version_key = f"{source_hash}_{param_hash}"
+        for existing in self.list_associations():
+            if existing.name.split("_", 1)[1] == version_key:
+                return existing
+
+        next_id = self._next_association_no()
+        out_dir = self.associations_dir / f"a{next_id:04d}_{version_key}"
+        staging = self.associations_dir / f".staging-a{next_id:04d}-{os.getpid()}"
+        staging.mkdir()
+        try:
+            self._write_association_staging(staging, association, params)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        staging.rename(out_dir)
+        for path in [*out_dir.rglob("*"), out_dir]:
+            if path.is_file():
+                path.chmod(0o444)
+
+        registry = self._load_registry()
+        for source_name, fingerprint in association.source_fingerprints.items():
+            registry[source_name] = {
+                "fingerprint": fingerprint,
+                "status": registry.get(source_name, {}).get("status", "active"),
+            }
+        self._save_registry(registry)
+        associations = self._load_association_registry()
+        associations[out_dir.name] = {"status": "active"}
+        self._save_association_registry(associations)
+        return out_dir
+
+    def _validate_association(
+        self,
+        association: MeasurementAssociation,
+        rna: CountMatrix,
+        protein: CountMatrix,
+    ) -> None:
+        expected = associate_measurements(
+            rna,
+            protein,
+            rna_source=association.rna_source,
+            protein_source=association.protein_source,
+            mode=association.mode,
+            manual_pairs={
+                (decision.rna_cell, decision.protein_cell)
+                for decision in association.decisions
+                if decision.basis == "manual"
+            },
+        )
+        reasons: list[str] = []
+        if association.source_fingerprints != expected.source_fingerprints:
+            reasons.append("RNA/蛋白来源指纹与实际矩阵不一致")
+        if association.mode != expected.mode:
+            reasons.append("关联范围与实际重算结果不一致")
+        if association.decisions != expected.decisions:
+            reasons.append("人工/自动关联决定与实际重算结果不一致")
+        if association.row_keys != expected.row_keys:
+            reasons.append("关联结果行身份或行顺序与实际重算结果不一致")
+        if association.fields != expected.fields:
+            reasons.append("关联结果字段身份或字段顺序与实际重算结果不一致")
+        if not np.array_equal(association.measured, expected.measured):
+            reasons.append("关联结果整种测量缺测掩码与实际重算结果不一致")
+        elif not np.allclose(
+            association.values[association.measured], expected.values[expected.measured]
+        ):
+            reasons.append("关联结果测量值与实际重算结果不一致")
+        if reasons:
+            raise PublishRejectedError(reasons)
+
+    def _write_association_staging(
+        self, staging: Path, association: MeasurementAssociation, params: dict
+    ) -> None:
+        report = association.to_dict()
+        (staging / "params.json").write_text(
+            json.dumps(params, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        (staging / "association_report.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        np.savez_compressed(
+            staging / "association.npz",
+            values=association.values,
+            measured=association.measured,
+            row_keys=np.array(association.row_keys),
+            display_names=np.array(association.display_names),
+            rna_cell_keys=np.array([v or "" for v in association.rna_cell_keys]),
+            rna_cell_present=np.array([v is not None for v in association.rna_cell_keys]),
+            protein_cell_keys=np.array([v or "" for v in association.protein_cell_keys]),
+            protein_cell_present=np.array(
+                [v is not None for v in association.protein_cell_keys]
+            ),
+            field_measurement=np.array([m for m, _ in association.fields]),
+            field_feature=np.array([f for _, f in association.fields]),
+        )
+        (staging / "meta.json").write_text(
+            json.dumps(
+                {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "kind": "rna_protein_association",
+                    "mode": association.mode,
+                    "rna_source": association.rna_source,
+                    "protein_source": association.protein_source,
+                    "batches": list(association.batches),
+                    "source_fingerprints": dict(association.source_fingerprints),
+                    "source_hash": self._association_hash(association)[:12],
+                    "param_hash": self._hash(params)[:12],
+                    "association_decisions": report["association_decisions"],
+                    "n_rows": association.n_rows,
+                    "n_fields": association.n_fields,
+                    "published": True,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    def _next_association_no(self) -> int:
+        numbers = []
+        for path in self.list_associations():
+            try:
+                numbers.append(int(path.name.split("_", 1)[0][1:]))
+            except (ValueError, IndexError):
+                continue
+        return (max(numbers) if numbers else 0) + 1
+
+    def list_associations(self) -> list[Path]:
+        if not self.associations_dir.exists():
+            return []
+        return sorted(p for p in self.associations_dir.glob("a*") if p.is_dir())
+
+    def load_association(self, version_dir: str | Path) -> MeasurementAssociation:
+        version_dir = Path(version_dir)
+        meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
+        with np.load(version_dir / "association.npz", allow_pickle=False) as data:
+            return MeasurementAssociation(
+                values=data["values"],
+                measured=data["measured"],
+                row_keys=tuple(str(v) for v in data["row_keys"]),
+                display_names=tuple(str(v) for v in data["display_names"]),
+                rna_cell_keys=tuple(
+                    None if not present else str(v)
+                    for v, present in zip(data["rna_cell_keys"], data["rna_cell_present"])
+                ),
+                protein_cell_keys=tuple(
+                    None if not present else str(v)
+                    for v, present in zip(
+                        data["protein_cell_keys"], data["protein_cell_present"]
+                    )
+                ),
+                fields=tuple(zip(
+                    (str(v) for v in data["field_measurement"]),
+                    (str(v) for v in data["field_feature"]),
+                )),
+                mode=meta["mode"],
+                decisions=tuple(),
+                rna_source=meta["rna_source"],
+                protein_source=meta["protein_source"],
+                source_fingerprints=meta["source_fingerprints"],
+                batches=tuple(meta["batches"]),
+            )
+
+    def verify_association(
+        self,
+        version_dir: str | Path,
+        rna: CountMatrix,
+        protein: CountMatrix,
+    ) -> dict:
+        version_dir = Path(version_dir)
+        loaded = self.load_association(version_dir)
+        meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
+        decisions = tuple(AssociationDecision(**item) for item in meta["association_decisions"])
+        association = MeasurementAssociation(
+            values=loaded.values,
+            measured=loaded.measured,
+            row_keys=loaded.row_keys,
+            display_names=loaded.display_names,
+            rna_cell_keys=loaded.rna_cell_keys,
+            protein_cell_keys=loaded.protein_cell_keys,
+            fields=loaded.fields,
+            mode=loaded.mode,
+            decisions=decisions,
+            rna_source=loaded.rna_source,
+            protein_source=loaded.protein_source,
+            source_fingerprints=loaded.source_fingerprints,
+            batches=loaded.batches,
+        )
+        problems = []
+        if self.association_status(version_dir) != "ok":
+            problems.append(f"关联已撤回: {self.association_status(version_dir)}")
+        try:
+            self._validate_association(association, rna, protein)
+        except PublishRejectedError as exc:
+            problems.extend(exc.reasons)
+        if problems:
+            raise PublishRejectedError(problems)
+        return {
+            "version": version_dir.name,
+            "status": "ok",
+            "row_keys": list(association.row_keys),
+            "fields": [list(field) for field in association.fields],
+            "missing_measurement_by_row": association.missing_measurement_by_row(),
+        }
+
+    def _load_association_registry(self) -> dict:
+        path = self.root / "associations.json"
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
+        return {}
+
+    def _save_association_registry(self, registry: dict) -> None:
+        (self.root / "associations.json").write_text(
+            json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def association_status(self, version_dir: str | Path) -> str:
+        name = Path(version_dir).name
+        status = self._load_association_registry().get(name, {}).get("status", "ok")
+        return "ok" if status == "active" else status
+
+    def withdraw_association(self, version_dir: str | Path) -> list[str]:
+        name = Path(version_dir).name
+        registry = self._load_association_registry()
+        registry[name] = {"status": "withdrawn"}
+        self._save_association_registry(registry)
+        return self.affected_downstream_filters("association", name)
+
+    def register_downstream_filter(
+        self, *, kind: str, version: str, filter_id: str, details: dict | None = None
+    ) -> None:
+        if kind not in {"joint", "association"}:
+            raise ValueError("kind 必须是 joint 或 association")
+        registry = self._load_downstream_filters()
+        registry.setdefault(kind, {}).setdefault(version, {})[filter_id] = details or {}
+        self._save_downstream_filters(registry)
+
+    def _load_downstream_filters(self) -> dict:
+        if self._downstream_path.exists():
+            return json.loads(self._downstream_path.read_text(encoding="utf-8"))
+        return {}
+
+    def _save_downstream_filters(self, registry: dict) -> None:
+        self._downstream_path.write_text(
+            json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def affected_downstream_filters(self, kind: str, version: str) -> list[str]:
+        return sorted(self._load_downstream_filters().get(kind, {}).get(version, {}))
+
+    def withdraw_batch_impact(self, batch: str) -> dict:
+        self.withdraw_batch(batch)
+        affected_joints = [
+            path.name for path in self.list_joints() if batch in self._joint_dependencies(path)
+        ]
+        affected_associations = []
+        for path in self.list_associations():
+            meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
+            if batch in meta.get("batches", []):
+                affected_associations.append(path.name)
+        filters = {
+            "joint": {v: self.affected_downstream_filters("joint", v) for v in affected_joints},
+            "association": {
+                v: self.affected_downstream_filters("association", v)
+                for v in affected_associations
+            },
+        }
+        return {
+            "batch": batch,
+            "joints": affected_joints,
+            "associations": affected_associations,
+            "downstream_filters": filters,
+        }
 
     def list_versions(self) -> list[Path]:
         return sorted(p for p in self.versions_dir.glob("v*") if p.is_dir())

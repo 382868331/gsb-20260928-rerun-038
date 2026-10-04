@@ -126,6 +126,45 @@ comparison = compare_join_modes(sources, qc_params)
 out = store.save_joint(joint=joint, sources=sources, params={"note": "v1"})
 ```
 
+## RNA 与蛋白关联
+
+RNA 与蛋白矩阵通过来源限定的细胞键建立关联，显示名只用于生成候选：
+
+- `association_candidates(...)` 列出每个显示名在 RNA、蛋白两侧的全部来源细胞；
+  跨两种测量出现的名称不会自动配对，一对多或重复显示名必须由人工选择完整键。
+- `associate_measurements(..., mode="paired_only")` 只保存明确配对的细胞；
+  `mode="all_cells"` 同时保留未配对细胞。
+- 未配对行保留行身份，但整种测量以 NaN + `measured=False` 表示；真实测得的 0
+  仍是数值 0 且 `measured=True`，二者严格区分。
+- 宽表字段顺序固定为先 RNA 后蛋白，并保存原始特征身份；关联决定含
+  `display_name`、两侧来源细胞键与 `manual` 依据。
+- `save_association(...)` 用实际 RNA/蛋白矩阵重算并核对行身份、字段顺序、
+  掩码、测量值与关联决定；补测改变来源内容后生成新版本，旧结果解释不变。
+- `register_downstream_filter(...)` 登记下游筛选；`withdraw_association(...)`
+  返回受影响筛选，`withdraw_batch_impact(...)` 同时列出受影响的联合结果、
+  RNA/蛋白关联及下游筛选。
+
+```python
+from scplatform import associate_measurements, association_candidates
+
+candidates = association_candidates(
+    rna, protein, rna_source="rna_run", protein_source="protein_run"
+)
+association = associate_measurements(
+    rna,
+    protein,
+    rna_source="rna_run",
+    protein_source="protein_run",
+    mode="all_cells",
+    manual_pairs={("rna_run::cell_x", "protein_run::cell_x")},
+)
+out = store.save_association(
+    association=association, rna=rna, protein=protein, params={"round": 1}
+)
+store.load_association(out)
+store.verify_association(out, rna, protein)
+```
+
 ## 结果目录与来源核对
 
 每个版本位于 `results/versions/vNNNN_<input_hash>_<param_hash>/`：

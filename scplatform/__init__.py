@@ -14,6 +14,14 @@ from .joint import (
     compare_join_modes,
     join_batches,
 )
+from .association import (
+    ASSOCIATION_MODES,
+    AssociationDecision,
+    CellCandidate,
+    MeasurementAssociation,
+    associate_measurements,
+    association_candidates,
+)
 
 __all__ = [
     "CountMatrix",
@@ -35,4 +43,10 @@ __all__ = [
     "cell_key",
     "join_batches",
     "compare_join_modes",
+    "ASSOCIATION_MODES",
+    "AssociationDecision",
+    "CellCandidate",
+    "MeasurementAssociation",
+    "associate_measurements",
+    "association_candidates",
 ]
