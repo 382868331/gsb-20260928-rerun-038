@@ -656,6 +656,15 @@ class ResultStore:
     def load_association(self, version_dir: str | Path) -> MeasurementAssociation:
         version_dir = Path(version_dir)
         meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
+        decisions = tuple(
+            AssociationDecision(
+                display_name=item["display_name"],
+                rna_cell=item["rna_cell"],
+                protein_cell=item["protein_cell"],
+                basis=item["basis"],
+            )
+            for item in meta.get("association_decisions", [])
+        )
         with np.load(version_dir / "association.npz", allow_pickle=False) as data:
             return MeasurementAssociation(
                 values=data["values"],
@@ -677,7 +686,7 @@ class ResultStore:
                     (str(v) for v in data["field_feature"]),
                 )),
                 mode=meta["mode"],
-                decisions=tuple(),
+                decisions=decisions,
                 rna_source=meta["rna_source"],
                 protein_source=meta["protein_source"],
                 source_fingerprints=meta["source_fingerprints"],
@@ -692,8 +701,6 @@ class ResultStore:
     ) -> dict:
         version_dir = Path(version_dir)
         loaded = self.load_association(version_dir)
-        meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
-        decisions = tuple(AssociationDecision(**item) for item in meta["association_decisions"])
         association = MeasurementAssociation(
             values=loaded.values,
             measured=loaded.measured,
@@ -703,7 +710,7 @@ class ResultStore:
             protein_cell_keys=loaded.protein_cell_keys,
             fields=loaded.fields,
             mode=loaded.mode,
-            decisions=decisions,
+            decisions=loaded.decisions,
             rna_source=loaded.rna_source,
             protein_source=loaded.protein_source,
             source_fingerprints=loaded.source_fingerprints,
