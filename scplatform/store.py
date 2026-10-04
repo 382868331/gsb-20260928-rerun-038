@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .associate import AssayJoint, AssayLink, associate_assays
 from .joint import JointMatrix, join_batches
 from .model import CountMatrix
 
@@ -130,6 +131,7 @@ class ResultStore:
         batch_of_cell: list[str],
         rule_used: dict[str, str],
         comparison: dict | None = None,
+        depends_on: list[str] | None = None,
     ) -> Path:
         # 发布前核对：结果身份必须与来源矩阵一致，否则整次拒绝，
         # 此时尚未创建任何目录，不会留下部分版本。
@@ -156,6 +158,7 @@ class ResultStore:
             self._write_staging(
                 staging, source_matrix, params, qc_report, normalized,
                 cell_ids, gene_ids, batch_of_cell, rule_used, comparison,
+                depends_on,
             )
         except Exception:
             # 写入中途失败：清理暂存目录，不留下看似有效的部分版本。
@@ -180,6 +183,7 @@ class ResultStore:
         batch_of_cell: list[str],
         rule_used: dict[str, str],
         comparison: dict | None,
+        depends_on: list[str] | None,
     ) -> None:
         identity = source_matrix.identity_digests()
         input_hash = source_matrix.content_fingerprint()[:12]
@@ -230,6 +234,7 @@ class ResultStore:
                     "n_cells": len(cell_ids),
                     "n_genes": len(gene_ids),
                     "published": True,
+                    "depends_on": list(depends_on or []),
                 },
                 indent=2,
                 ensure_ascii=False,
@@ -526,4 +531,297 @@ class ResultStore:
             "kept_cell_ids": cell_ids,
             "gene_ids": gene_ids,
             "batch_of_cell": batch_of_cell,
+        }
+
+    # ---------------- 两种测量关联：保存、核对、撤回与影响追踪 ----------------
+
+    @property
+    def assocs_dir(self) -> Path:
+        path = self.root / "assocs"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def _assoc_registry_path(self) -> Path:
+        return self.root / "associations.json"
+
+    def _load_assoc_registry(self) -> dict:
+        if self._assoc_registry_path.exists():
+            return json.loads(self._assoc_registry_path.read_text(encoding="utf-8"))
+        return {}
+
+    def _save_assoc_registry(self, registry: dict) -> None:
+        self._assoc_registry_path.write_text(
+            json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    @staticmethod
+    def _assoc_source_hash(joint: AssayJoint) -> str:
+        payload = {
+            "scope": joint.scope,
+            "sources": joint.source_fingerprints,
+            "links": [link.to_dict() for link in joint.links],
+        }
+        return ResultStore._hash(payload)
+
+    def list_assocs(self) -> list[Path]:
+        assocs_dir = self.root / "assocs"
+        if not assocs_dir.exists():
+            return []
+        return sorted(p for p in assocs_dir.glob("a*") if p.is_dir())
+
+    def _next_assoc_no(self) -> int:
+        existing = []
+        for p in self.list_assocs():
+            try:
+                existing.append(int(p.name.split("_", 1)[0][1:]))
+            except (ValueError, IndexError):
+                continue
+        return (max(existing) if existing else 0) + 1
+
+    def save_association(
+        self,
+        *,
+        joint: AssayJoint,
+        rna: dict[str, CountMatrix],
+        protein: dict[str, CountMatrix],
+        params: dict,
+    ) -> Path:
+        """保存两种测量的联合结果为不可覆盖的新版本。
+
+        发布前用实际矩阵按同一关联决定重新关联，逐项核对行列身份、
+        字段顺序、缺测掩码与测量值；任何不一致或写入中途失败都整次
+        拒绝，不留下混杂版本。批次补测后来源指纹变化，自动生成新版本，
+        旧版本的解释保持不变。
+        """
+        self._validate_association(joint, rna, protein)
+
+        source_hash = self._assoc_source_hash(joint)[:12]
+        param_hash = self._hash(params)[:12]
+        version_key = f"{source_hash}_{param_hash}"
+        for existing in self.list_assocs():
+            if existing.name.split("_", 1)[1] == version_key:
+                return existing  # 相同来源+关联决定+参数：幂等复用
+
+        next_id = self._next_assoc_no()
+        out_dir = self.assocs_dir / f"a{next_id:04d}_{version_key}"
+        if out_dir.exists():
+            raise RuntimeError(f"关联结果目录已存在，拒绝覆盖: {out_dir}")
+        staging = self.assocs_dir / f".staging-a{next_id:04d}-{os.getpid()}"
+        staging.mkdir()
+        try:
+            self._write_assoc_staging(staging, joint, params)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        staging.rename(out_dir)
+        for path in [*out_dir.rglob("*"), out_dir]:
+            if path.is_file():
+                path.chmod(0o444)
+
+        registry = self._load_assoc_registry()
+        registry.setdefault(out_dir.name, {"status": "active"})
+        self._save_assoc_registry(registry)
+        return out_dir
+
+    @staticmethod
+    def _validate_association(
+        joint: AssayJoint, rna: dict[str, CountMatrix], protein: dict[str, CountMatrix]
+    ) -> None:
+        """发布前核对：行列身份、字段顺序、关联决定与实际矩阵一致。"""
+        reasons: list[str] = []
+        expected_fp: dict[str, str] = {}
+        for batch, matrix in rna.items():
+            expected_fp[f"rna::{batch}"] = matrix.content_fingerprint()
+        for batch, matrix in protein.items():
+            expected_fp[f"protein::{batch}"] = matrix.content_fingerprint()
+        if dict(joint.source_fingerprints) != expected_fp:
+            reasons.append("联合结果的来源指纹与实际 RNA/蛋白矩阵不符")
+        if reasons:
+            raise PublishRejectedError(reasons)
+        try:
+            expected = associate_assays(
+                rna, protein, joint.scope, manual_links=joint.manual_link_pairs()
+            )
+        except ValueError as exc:
+            raise PublishRejectedError([f"按保存的关联决定重新关联失败: {exc}"])
+        if list(joint.feature_ids) != list(expected.feature_ids):
+            reasons.append("联合结果的字段顺序与实际矩阵重新关联的结果不一致")
+        if list(joint.modality_of_feature) != list(expected.modality_of_feature):
+            reasons.append("联合结果的字段测量归属与实际矩阵不一致")
+        if list(joint.row_keys) != list(expected.row_keys):
+            reasons.append("联合结果的行身份及顺序与实际矩阵重新关联的结果不一致")
+        if [l.to_dict() for l in joint.links] != [l.to_dict() for l in expected.links]:
+            reasons.append("联合结果的关联决定与重新关联的结果不一致")
+        if not reasons:
+            if not np.array_equal(joint.measured, expected.measured):
+                reasons.append("联合结果的缺测说明与实际矩阵不一致")
+            elif not np.allclose(
+                joint.values[joint.measured], expected.values[expected.measured]
+            ):
+                reasons.append("联合结果的测量值与实际矩阵不一致")
+        if reasons:
+            raise PublishRejectedError(reasons)
+
+    def _write_assoc_staging(
+        self, staging: Path, joint: AssayJoint, params: dict
+    ) -> None:
+        (staging / "params.json").write_text(
+            json.dumps(params, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        (staging / "assoc_report.json").write_text(
+            json.dumps(joint.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        np.savez_compressed(
+            staging / "assoc.npz",
+            values=joint.values,
+            measured=joint.measured,
+            row_keys=np.array(joint.row_keys),
+            rna_keys=np.array([k if k is not None else "" for k in joint.rna_keys]),
+            protein_keys=np.array(
+                [k if k is not None else "" for k in joint.protein_keys]
+            ),
+            display_names=np.array(joint.display_names),
+            feature_ids=np.array(joint.feature_ids),
+            modality_of_feature=np.array(joint.modality_of_feature),
+        )
+        (staging / "meta.json").write_text(
+            json.dumps(
+                {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "kind": "association",
+                    "scope": joint.scope,
+                    "source_fingerprints": dict(joint.source_fingerprints),
+                    "links": [link.to_dict() for link in joint.links],
+                    "source_hash": self._assoc_source_hash(joint)[:12],
+                    "param_hash": self._hash(params)[:12],
+                    "n_rows": joint.n_rows,
+                    "n_features": joint.n_features,
+                    "published": True,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    def load_association(self, version_dir: str | Path) -> AssayJoint:
+        """重开已保存的关联版本，恢复行列身份、字段顺序与关联决定。"""
+        version_dir = Path(version_dir)
+        meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
+        with np.load(version_dir / "assoc.npz", allow_pickle=False) as data:
+            rna_keys = tuple(
+                str(k) if str(k) else None for k in data["rna_keys"]
+            )
+            protein_keys = tuple(
+                str(k) if str(k) else None for k in data["protein_keys"]
+            )
+            return AssayJoint(
+                values=data["values"],
+                measured=data["measured"],
+                row_keys=tuple(str(k) for k in data["row_keys"]),
+                rna_keys=rna_keys,
+                protein_keys=protein_keys,
+                display_names=tuple(str(n) for n in data["display_names"]),
+                feature_ids=tuple(str(f) for f in data["feature_ids"]),
+                modality_of_feature=tuple(str(m) for m in data["modality_of_feature"]),
+                links=tuple(
+                    AssayLink(
+                        rna_key=l["rna_key"],
+                        protein_key=l["protein_key"],
+                        display_name=l["display_name"],
+                        decided_by=l["decided_by"],
+                    )
+                    for l in meta["links"]
+                ),
+                scope=meta["scope"],
+                source_fingerprints=meta["source_fingerprints"],
+            )
+
+    def association_status(self, version_dir: str | Path) -> str:
+        """关联版本状态：ok / withdrawn（被撤回或来源批次被撤回）。"""
+        version_dir = Path(version_dir)
+        registry = self._load_assoc_registry()
+        if registry.get(version_dir.name, {}).get("status") == "withdrawn":
+            return "withdrawn"
+        batch_registry = self._load_registry()
+        meta = json.loads((version_dir / "meta.json").read_text(encoding="utf-8"))
+        for source in meta.get("source_fingerprints", {}):
+            batch = source.split("::", 1)[1]
+            if batch_registry.get(batch, {}).get("status") == "withdrawn":
+                return f"withdrawn:{batch}"
+        return "ok"
+
+    def verify_association(
+        self,
+        version_dir: str | Path,
+        rna: dict[str, CountMatrix],
+        protein: dict[str, CountMatrix],
+    ) -> dict:
+        """重开关联版本并逐项核对：行列身份、字段顺序、关联决定、缺测
+        说明与实际矩阵一致，且未被撤回；任何问题都抛出 PublishRejectedError。"""
+        version_dir = Path(version_dir)
+        problems: list[str] = []
+        status = self.association_status(version_dir)
+        if status != "ok":
+            problems.append(f"关联结果已失效: {status}")
+        joint = self.load_association(version_dir)
+        try:
+            self._validate_association(joint, rna, protein)
+        except PublishRejectedError as exc:
+            problems.extend(exc.reasons)
+        if problems:
+            raise PublishRejectedError(problems)
+        return {
+            "version": version_dir.name,
+            "scope": joint.scope,
+            "status": status,
+            "row_keys": list(joint.row_keys),
+            "feature_ids": list(joint.feature_ids),
+            "links": [link.to_dict() for link in joint.links],
+        }
+
+    def withdraw_association(self, version_dir: str | Path) -> dict:
+        """撤回一个关联版本；返回受影响的下游筛选版本列表。"""
+        version_dir = Path(version_dir)
+        registry = self._load_assoc_registry()
+        entry = registry.get(version_dir.name, {})
+        entry["status"] = "withdrawn"
+        registry[version_dir.name] = entry
+        self._save_assoc_registry(registry)
+        return {
+            "association": version_dir.name,
+            "filters": self._filters_depending_on({version_dir.name}),
+        }
+
+    def _filters_depending_on(self, targets: set[str]) -> list[str]:
+        """下游筛选版本中 depends_on 命中受影响对象的版本名。"""
+        affected: list[str] = []
+        for version in self.list_versions():
+            meta_path = version / "meta.json"
+            if not meta_path.exists():
+                continue
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if set(meta.get("depends_on", [])) & targets:
+                affected.append(version.name)
+        return affected
+
+    def withdrawal_impact(self, batch: str) -> dict:
+        """撤回批次的影响面：依赖它的联合分析集、两种测量关联，
+        以及依赖这些结果的下游筛选版本。"""
+        joints = [
+            v.name for v in self.list_joints() if batch in self._joint_dependencies(v)
+        ]
+        assocs: list[str] = []
+        for assoc in self.list_assocs():
+            meta = json.loads((assoc / "meta.json").read_text(encoding="utf-8"))
+            sources = meta.get("source_fingerprints", {})
+            if any(source.split("::", 1)[1] == batch for source in sources):
+                assocs.append(assoc.name)
+        filters = self._filters_depending_on(set(joints) | set(assocs))
+        return {
+            "batch": batch,
+            "joints": joints,
+            "associations": assocs,
+            "filters": filters,
         }

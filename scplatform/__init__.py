@@ -14,6 +14,13 @@ from .joint import (
     compare_join_modes,
     join_batches,
 )
+from .associate import (
+    ASSOC_SCOPES,
+    AmbiguousPairingError,
+    AssayJoint,
+    AssayLink,
+    associate_assays,
+)
 
 __all__ = [
     "CountMatrix",
@@ -35,4 +42,9 @@ __all__ = [
     "cell_key",
     "join_batches",
     "compare_join_modes",
+    "ASSOC_SCOPES",
+    "AmbiguousPairingError",
+    "AssayJoint",
+    "AssayLink",
+    "associate_assays",
 ]

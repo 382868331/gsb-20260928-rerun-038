@@ -1,0 +1,75 @@
+{
+  "scope": "all",
+  "n_rows": 5,
+  "n_features": 5,
+  "feature_ids": [
+    "rna::G1",
+    "rna::G2",
+    "rna::G3",
+    "protein::M1",
+    "protein::M2"
+  ],
+  "modality_of_feature": [
+    "rna",
+    "rna",
+    "rna",
+    "protein",
+    "protein"
+  ],
+  "source_fingerprints": {
+    "rna::rna1": "11090863eac9e2ee0a0da9928d3aceeba78de23f98b14634a8de37c366b22f6a",
+    "protein::prot1": "330e0061f4b473ed5534ac093818813aa3a32a0816d2ae85b94fd55b541584b9",
+    "protein::prot2": "4a5e8cc5fd3a17426f530edd54f594c1d785a0790438e6fcf0d4a4ce7e424255"
+  },
+  "links": [
+    {
+      "rna_key": "rna1::cell_dup",
+      "protein_key": "prot2::cell_dup",
+      "display_name": "cell_dup",
+      "decided_by": "manual"
+    },
+    {
+      "rna_key": "rna1::cell_zero",
+      "protein_key": "prot1::cell_zero",
+      "display_name": "cell_zero",
+      "decided_by": "auto_unique"
+    }
+  ],
+  "rows": [
+    {
+      "row_key": "rna1::cell_dup|prot2::cell_dup",
+      "rna_key": "rna1::cell_dup",
+      "protein_key": "prot2::cell_dup",
+      "display_name": "cell_dup",
+      "n_measured_features": 5
+    },
+    {
+      "row_key": "rna1::cell_zero|prot1::cell_zero",
+      "rna_key": "rna1::cell_zero",
+      "protein_key": "prot1::cell_zero",
+      "display_name": "cell_zero",
+      "n_measured_features": 5
+    },
+    {
+      "row_key": "rna1::cell_rna_only",
+      "rna_key": "rna1::cell_rna_only",
+      "protein_key": null,
+      "display_name": "cell_rna_only",
+      "n_measured_features": 3
+    },
+    {
+      "row_key": "prot1::cell_dup",
+      "rna_key": null,
+      "protein_key": "prot1::cell_dup",
+      "display_name": "cell_dup",
+      "n_measured_features": 2
+    },
+    {
+      "row_key": "prot1::cell_prot_only",
+      "rna_key": null,
+      "protein_key": "prot1::cell_prot_only",
+      "display_name": "cell_prot_only",
+      "n_measured_features": 2
+    }
+  ]
+}

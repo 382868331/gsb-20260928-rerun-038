@@ -126,6 +126,42 @@ comparison = compare_join_modes(sources, qc_params)
 out = store.save_joint(joint=joint, sources=sources, params={"note": "v1"})
 ```
 
+## RNA 与蛋白两种测量关联
+
+在单模态联合之外，平台提供 RNA 与蛋白两种测量的关联入口
+（`associate_assays(rna, protein, scope, manual_links)`）：
+
+- 每种测量、每个细胞都带来源：内部身份为 `批次::细胞ID`，显示名仅用于
+  候选匹配；重复显示名**绝不自动配对**，一对多候选由
+  `AmbiguousPairingError` 逐名列出，必须通过 `manual_links` 人工选择，
+  每条关联决定（自动唯一 / 人工）都记录在结果中。
+- 两种细胞范围：`"paired"` 仅保留配对细胞；`"all"` 保留全部细胞，
+  未配对细胞的另一种测量整体缺失（NaN + `measured=False`）。
+- 真实零计数仍是测量值 0，整种测量缺失是 NaN，两者严格区分。
+- `store.save_association(joint=, rna=, protein=, params=)` 发布前用实际
+  矩阵按同一关联决定重新关联，逐项核对行列身份、字段顺序、缺测掩码与
+  测量值，任一不符整次拒绝；保存结果保留行列身份、字段顺序与全部关联
+  决定。批次补测后来源指纹变化，自动生成新版本，旧版本解释不变。
+- `store.load_association(...)` / `store.verify_association(...)` 重开后
+  逐行逐字段追溯核对；`store.withdraw_association(...)` 撤回关联并列出
+  受影响的下游筛选版本；`store.withdrawal_impact(batch)` 列出撤回批次
+  波及的联合分析集、关联结果与下游筛选。`save_run(..., depends_on=[...])`
+  用于登记筛选版本对关联结果的依赖。
+
+```python
+from scplatform import associate_assays
+
+joint = associate_assays(
+    {"rna1": rna_matrix},
+    {"prot1": prot_matrix_1, "prot2": prot_matrix_2},
+    "all",
+    manual_links=(("rna1::cell_dup", "prot2::cell_dup"),),  # 重名须人工选择
+)
+out = store.save_association(joint=joint, rna={"rna1": rna_matrix},
+                             protein={"prot1": prot_matrix_1, "prot2": prot_matrix_2},
+                             params={"note": "assoc-v1"})
+```
+
 ## 结果目录与来源核对
 
 每个版本位于 `results/versions/vNNNN_<input_hash>_<param_hash>/`：

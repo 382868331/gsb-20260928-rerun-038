@@ -163,6 +163,61 @@ def demo_joint() -> None:
     affected = store.withdraw_batch("batchB")
     print("[joint] 撤回 batchB 影响版本:", affected, "状态:", store.joint_status(out2))
 
+    demo_association()
+
+
+def demo_association() -> None:
+    """RNA+蛋白关联：重名人工选择、缺测与零区分、撤回影响追踪。"""
+    import numpy as np
+    from scplatform import AmbiguousPairingError, CountMatrix, associate_assays
+
+    print("\n=== RNA 与蛋白关联演示 ===")
+    rna = {
+        "rna1": CountMatrix(
+            counts=np.array([[5, 0, 3], [0, 0, 0], [7, 1, 0]], dtype=np.int64),
+            cell_ids=("cell_dup", "cell_zero", "cell_rna_only"),
+            gene_ids=("G1", "G2", "G3"),
+            batch_of_cell=("rna1",) * 3,
+        )
+    }
+    protein = {
+        "prot1": CountMatrix(
+            counts=np.array([[10, 2], [0, 0], [4, 0]], dtype=np.int64),
+            cell_ids=("cell_dup", "cell_zero", "cell_prot_only"),
+            gene_ids=("M1", "M2"),
+            batch_of_cell=("prot1",) * 3,
+        ),
+        "prot2": CountMatrix(
+            counts=np.array([[9, 9]], dtype=np.int64),
+            cell_ids=("cell_dup",),
+            gene_ids=("M1", "M2"),
+            batch_of_cell=("prot2",),
+        ),
+    }
+    # cell_dup 在蛋白两侧各出现一次：一对多候选，绝不自动配对
+    try:
+        associate_assays(rna, protein, "paired")
+    except AmbiguousPairingError as exc:
+        print("[assoc] 重名拒绝自动配对:", exc.unresolved)
+
+    joint = associate_assays(
+        rna, protein, "all",
+        manual_links=(("rna1::cell_dup", "prot2::cell_dup"),),
+    )
+    print("[assoc] 行身份:", joint.row_keys)
+    print("[assoc] 字段顺序:", joint.feature_ids)
+    print("[assoc] 关联决定:", [l.to_dict() for l in joint.links])
+
+    store = ResultStore(RESULTS)
+    out = store.save_association(joint=joint, rna=rna, protein=protein,
+                                 params={"note": "assoc-v1"})
+    print("[assoc] 已保存 ->", out)
+    summary = store.verify_association(out, rna, protein)
+    print("[assoc] 重开核对状态:", summary["status"])
+
+    impact = store.withdraw_association(out)
+    print("[assoc] 撤回关联影响下游筛选:", impact["filters"])
+
 
 if __name__ == "__main__":
     main()
