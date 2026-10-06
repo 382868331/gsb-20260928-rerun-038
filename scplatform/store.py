@@ -18,6 +18,7 @@ import numpy as np
 from .association import (
     AssociationDecision,
     MeasurementAssociation,
+    PairingCapacities,
     associate_measurements,
 )
 from .joint import JointMatrix, join_batches
@@ -507,6 +508,7 @@ class ResultStore:
             "rna_source": association.rna_source,
             "protein_source": association.protein_source,
             "sources": association.source_fingerprints,
+            "capacities": association.capacities.to_dict(),
             "decisions": [decision.to_dict() for decision in association.decisions],
         }
         return ResultStore._hash(payload)
@@ -565,10 +567,12 @@ class ResultStore:
             rna_source=association.rna_source,
             protein_source=association.protein_source,
             mode=association.mode,
-            manual_pairs={
-                (decision.rna_cell, decision.protein_cell)
+            manual_pairs=set(),
+            capacities=association.capacities,
+            approved_decisions=association.decisions,
+            candidate_pairs={
+                (decision.rna_cell, decision.protein_cell, decision.display_name)
                 for decision in association.decisions
-                if decision.basis == "manual"
             },
         )
         reasons: list[str] = []
@@ -626,6 +630,7 @@ class ResultStore:
                     "protein_source": association.protein_source,
                     "batches": list(association.batches),
                     "source_fingerprints": dict(association.source_fingerprints),
+                    "capacities": association.capacities.to_dict(),
                     "source_hash": self._association_hash(association)[:12],
                     "param_hash": self._hash(params)[:12],
                     "association_decisions": report["association_decisions"],
@@ -688,6 +693,7 @@ class ResultStore:
                 protein_source=meta["protein_source"],
                 source_fingerprints=meta["source_fingerprints"],
                 batches=tuple(meta["batches"]),
+                capacities=PairingCapacities.from_dict(meta.get("capacities")),
             )
 
     def verify_association(

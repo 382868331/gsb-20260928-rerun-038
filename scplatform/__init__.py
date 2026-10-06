@@ -17,10 +17,13 @@ from .joint import (
 from .association import (
     ASSOCIATION_MODES,
     AssociationDecision,
+    CapacityPairingPlan,
     CellCandidate,
     MeasurementAssociation,
+    PairingCapacities,
     associate_measurements,
     association_candidates,
+    plan_capacity_pairing,
 )
 
 __all__ = [
@@ -45,8 +48,11 @@ __all__ = [
     "compare_join_modes",
     "ASSOCIATION_MODES",
     "AssociationDecision",
+    "CapacityPairingPlan",
     "CellCandidate",
     "MeasurementAssociation",
+    "PairingCapacities",
     "associate_measurements",
     "association_candidates",
+    "plan_capacity_pairing",
 ]

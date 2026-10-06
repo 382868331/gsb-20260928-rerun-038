@@ -165,6 +165,61 @@ store.load_association(out)
 store.verify_association(out, rna, protein)
 ```
 
+### 容量约束配对研究
+
+当研究者声明同一 RNA 或蛋白来源允许有限一对多时，使用 `plan_capacity_pairing(...)`
+先形成研究方案，再由用户批准进入正式联合关联：
+
+- `PairingCapacities(default=1, rna={...}, protein={...})` 为具体来源细胞声明容量；
+  求解时同一来源的使用次数不能超过容量，不能在多个候选中重复超额使用。
+- `candidate_pairs` 使用 `(RNA完整键, 蛋白完整键, 共享显示名)` 描述可配对来源；
+  有限一对多必须显式列出候选，不能只依赖显示名猜测。
+- 相似性只计算两侧都观测到的共同特征；完全没有共同观测的候选进入
+  `no_observation_pairs`，不会得到高相似性，也不会仅因缺测自动选中。
+- `locked_pairs` 是人工锁定关系。容量冲突或锁定关系无效时方案为
+  `infeasible_locked_conflict`，报告保留冲突锁定关系但不自动撤销。
+- `existing_pairs` 用于比较既有决定；方案报告 `overall_consistency`、
+  `retained_pairs` 和保留数量，帮助衡量重新配对对既有决定的影响。
+- `plan.approved_decisions(selected_pairs=...)` 可批准部分方案，但选择必须包含
+  相关人工锁定闭合配对；随后传给 `associate_measurements(...)` 形成正式结果。
+- 补测改变 RNA/蛋白矩阵内容后仍通过 `save_association(...)` 生成新版本；旧方案和
+  旧下游结果不被覆盖，可用共享来源、缺测掩码和人工改选记录复核最终影响。
+
+```python
+from scplatform import PairingCapacities, plan_capacity_pairing
+
+plan = plan_capacity_pairing(
+    rna,
+    protein,
+    rna_source="rna_run",
+    protein_source="protein_run",
+    capacities=PairingCapacities(default=1, rna={"rna_run::cell1": 2}),
+    candidate_pairs={
+        ("rna_run::cell1", "protein_run::cell1a", "cell1"),
+        ("rna_run::cell1", "protein_run::cell1b", "cell1"),
+    },
+    locked_pairs={("rna_run::cell1", "protein_run::cell1a")},
+    existing_pairs={("rna_run::cell1", "protein_run::cell1a")},
+)
+if not plan.feasible:
+    raise RuntimeError(plan.to_dict()["conflicts"])
+
+approved = plan.approved_decisions()  # 或传入满足锁定闭合的部分配对
+association = associate_measurements(
+    rna,
+    protein,
+    rna_source="rna_run",
+    protein_source="protein_run",
+    mode="paired_only",
+    capacities=plan.capacities,
+    approved_decisions=approved,
+    candidate_pairs={
+        (pair[0], pair[1], plan.display_by_pair[pair])
+        for pair in plan.pairs
+    },
+)
+```
+
 ## 结果目录与来源核对
 
 每个版本位于 `results/versions/vNNNN_<input_hash>_<param_hash>/`：
