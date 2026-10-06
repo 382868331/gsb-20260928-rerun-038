@@ -165,6 +165,46 @@ store.load_association(out)
 store.verify_association(out, rna, protein)
 ```
 
+## RNA 与蛋白容量约束配对研究
+
+在关联决定之上，研究者可以声明容量规则做联合配对研究：
+
+- `solve_pairing(rna, protein, capacities={...}, manual_locks={...})`：每个来源
+  声明每个细胞最多参与的配对数（缺省两侧均为 1，即一对一；k>1 为有限一对多）。
+  同一来源细胞的容量绝不在多个候选中重复使用。
+- 候选相似性只在两侧都真实测量的同名特征上计算（log1p 余弦）；缺测特征被排除
+  而不是当作零，真实零计数仍是有效测量。没有任何共同观测的候选
+  `similarity=None`，绝不参与自动配对、也不会被当成高相似。
+- 人工锁定必须全部满足；锁定超容量或引用未知细胞时抛出
+  `PairingConflictError`，逐条列出冲突锁定，系统绝不自动撤销。
+- `plan.overall_consistency()` 给出自动配对的总体一致性；
+  `plan.compare_with_decisions(decisions)` 比较与既有关联决定的保留程度
+  （preserved/dropped/added 与 preservation_rate）。
+- `approve_pairs(plan, approved)` 只批准部分配对：共享同一来源细胞的配对构成
+  依赖闭包，必须整体接受或整体放弃，闭包外的配对回到未配对。
+- `store.save_pairing(plan=..., rna=..., protein=..., params=...)` 发布前用实际
+  矩阵按方案记录的容量、锁定与阈值重新求解核对；补测改变来源内容后指纹变化，
+  只生成新版本，旧方案解释不变。`store.load_pairing` / `store.verify_pairing`
+  重开后以共享来源、缺测掩码与人工锁定逐项核对；
+  `withdraw_batch_impact(...)` 同时列出受影响的配对方案及其下游筛选。
+
+`python
+from scplatform import approve_pairs, solve_pairing
+
+plan = solve_pairing(
+    rna,
+    protein,
+    rna_source="rna_run",
+    protein_source="protein_run",
+    capacities={"protein_run": 2},  # 有限一对多
+    manual_locks={("rna_run::cell_a", "protein_run::cell_x")},
+    min_similarity=0.5,
+)
+partial = approve_pairs(plan, {("rna_run::cell_a", "protein_run::cell_x")})
+out = store.save_pairing(plan=partial, rna=rna, protein=protein, params={"round": 1})
+store.verify_pairing(out, rna, protein)
+`
+
 ## 结果目录与来源核对
 
 每个版本位于 `results/versions/vNNNN_<input_hash>_<param_hash>/`：

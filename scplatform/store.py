@@ -22,6 +22,12 @@ from .association import (
 )
 from .joint import JointMatrix, join_batches
 from .model import CountMatrix
+from .pairing import (
+    PairedMatch,
+    PairingConflictError,
+    PairingPlan,
+    solve_pairing,
+)
 
 
 class PublishRejectedError(ValueError):
@@ -741,8 +747,8 @@ class ResultStore:
     def register_downstream_filter(
         self, *, kind: str, version: str, filter_id: str, details: dict | None = None
     ) -> None:
-        if kind not in {"joint", "association"}:
-            raise ValueError("kind 必须是 joint 或 association")
+        if kind not in {"joint", "association", "pairing"}:
+            raise ValueError("kind 必须是 joint、association 或 pairing")
         registry = self._load_downstream_filters()
         registry.setdefault(kind, {}).setdefault(version, {})[filter_id] = details or {}
         self._save_downstream_filters(registry)
@@ -770,17 +776,27 @@ class ResultStore:
             meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
             if batch in meta.get("batches", []):
                 affected_associations.append(path.name)
+        affected_pairings = []
+        for path in self.list_pairings():
+            meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
+            if batch in meta.get("batches", []):
+                affected_pairings.append(path.name)
         filters = {
             "joint": {v: self.affected_downstream_filters("joint", v) for v in affected_joints},
             "association": {
                 v: self.affected_downstream_filters("association", v)
                 for v in affected_associations
             },
+            "pairing": {
+                v: self.affected_downstream_filters("pairing", v)
+                for v in affected_pairings
+            },
         }
         return {
             "batch": batch,
             "joints": affected_joints,
             "associations": affected_associations,
+            "pairings": affected_pairings,
             "downstream_filters": filters,
         }
 
@@ -827,4 +843,242 @@ class ResultStore:
             "kept_cell_ids": cell_ids,
             "gene_ids": gene_ids,
             "batch_of_cell": batch_of_cell,
+        }
+
+    # ------------- 容量约束配对研究：保存、重开、核对与下游影响 -------------
+
+    @property
+    def pairings_dir(self) -> Path:
+        path = self.root / "pairings"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @staticmethod
+    def _pairing_hash(plan: PairingPlan) -> str:
+        payload = {
+            "rna_source": plan.rna_source,
+            "protein_source": plan.protein_source,
+            "capacities": plan.capacities,
+            "manual_locks": [list(lock) for lock in plan.manual_locks],
+            "min_similarity": plan.min_similarity,
+            "sources": plan.source_fingerprints,
+            "pairs": [p.to_dict() for p in plan.pairs],
+        }
+        return ResultStore._hash(payload)
+
+    def save_pairing(
+        self,
+        *,
+        plan: PairingPlan,
+        rna: CountMatrix,
+        protein: CountMatrix,
+        params: dict,
+        rna_measured: np.ndarray | None = None,
+        protein_measured: np.ndarray | None = None,
+    ) -> Path:
+        """保存容量约束配对方案为不可覆盖的新版本。
+
+        发布前用实际 RNA/蛋白矩阵按方案记录的容量、锁定与阈值重新求解，
+        方案中的每一对都必须出现在重算结果中且相似性一致；补测改变
+        来源内容后指纹变化，自动生成新版本，旧方案解释不变。
+        """
+        self._validate_pairing(
+            plan, rna, protein, rna_measured=rna_measured,
+            protein_measured=protein_measured,
+        )
+        source_hash = self._pairing_hash(plan)[:12]
+        param_hash = self._hash(params)[:12]
+        version_key = f"{source_hash}_{param_hash}"
+        for existing in self.list_pairings():
+            if existing.name.split("_", 1)[1] == version_key:
+                return existing
+
+        next_id = self._next_pairing_no()
+        out_dir = self.pairings_dir / f"p{next_id:04d}_{version_key}"
+        staging = self.pairings_dir / f".staging-p{next_id:04d}-{os.getpid()}"
+        staging.mkdir()
+        try:
+            self._write_pairing_staging(staging, plan, params)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        staging.rename(out_dir)
+        for path in [*out_dir.rglob("*"), out_dir]:
+            if path.is_file():
+                path.chmod(0o444)
+
+        registry = self._load_registry()
+        for source_name, fingerprint in plan.source_fingerprints.items():
+            registry[source_name] = {
+                "fingerprint": fingerprint,
+                "status": registry.get(source_name, {}).get("status", "active"),
+            }
+        self._save_registry(registry)
+        return out_dir
+
+    def _validate_pairing(
+        self,
+        plan: PairingPlan,
+        rna: CountMatrix,
+        protein: CountMatrix,
+        *,
+        rna_measured: np.ndarray | None = None,
+        protein_measured: np.ndarray | None = None,
+    ) -> None:
+        """发布前核对：共享来源指纹、缺测影响下的相似性、人工锁定与容量。"""
+        reasons: list[str] = []
+        expected_fingerprints = {
+            "rna": rna.content_fingerprint(),
+            "protein": protein.content_fingerprint(),
+        }
+        if plan.source_fingerprints != expected_fingerprints:
+            reasons.append("RNA/蛋白来源指纹与实际矩阵不一致")
+            raise PublishRejectedError(reasons)
+        try:
+            expected = solve_pairing(
+                rna,
+                protein,
+                rna_source=plan.rna_source,
+                protein_source=plan.protein_source,
+                capacities=plan.capacities,
+                manual_locks=set(plan.manual_locks),
+                min_similarity=plan.min_similarity,
+                rna_measured=rna_measured,
+                protein_measured=protein_measured,
+            )
+        except PairingConflictError as exc:
+            raise PublishRejectedError(
+                [f"人工锁定冲突，方案不可行: {c}" for c in exc.conflicts]
+            ) from exc
+        expected_pairs = {(p.rna_cell, p.protein_cell): p for p in expected.pairs}
+        for pair in plan.pairs:
+            key = (pair.rna_cell, pair.protein_cell)
+            found = expected_pairs.get(key)
+            if found is None:
+                reasons.append(f"配对 {key} 不在按实际矩阵重算的可行方案中")
+                continue
+            if found.basis != pair.basis:
+                reasons.append(f"配对 {key} 的依据与重算结果不一致")
+            if (found.similarity is None) != (pair.similarity is None) or (
+                found.similarity is not None
+                and pair.similarity is not None
+                and not np.isclose(found.similarity, pair.similarity)
+            ):
+                reasons.append(f"配对 {key} 的观测相似性与重算结果不一致")
+        if set(plan.manual_locks) - set(expected.manual_locks):
+            reasons.append("方案的人工锁定与重算结果不一致")
+        if reasons:
+            raise PublishRejectedError(reasons)
+
+    def _write_pairing_staging(
+        self, staging: Path, plan: PairingPlan, params: dict
+    ) -> None:
+        report = plan.to_dict()
+        (staging / "params.json").write_text(
+            json.dumps(params, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        (staging / "pairing_report.json").write_text(
+            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        (staging / "meta.json").write_text(
+            json.dumps(
+                {
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "kind": "rna_protein_pairing",
+                    "rna_source": plan.rna_source,
+                    "protein_source": plan.protein_source,
+                    "batches": list(plan.batches),
+                    "capacities": dict(plan.capacities),
+                    "min_similarity": plan.min_similarity,
+                    "source_fingerprints": dict(plan.source_fingerprints),
+                    "source_hash": self._pairing_hash(plan)[:12],
+                    "param_hash": self._hash(params)[:12],
+                    "n_pairs": plan.n_pairs,
+                    "published": True,
+                },
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    def _next_pairing_no(self) -> int:
+        numbers = []
+        for path in self.list_pairings():
+            try:
+                numbers.append(int(path.name.split("_", 1)[0][1:]))
+            except (ValueError, IndexError):
+                continue
+        return (max(numbers) if numbers else 0) + 1
+
+    def list_pairings(self) -> list[Path]:
+        pairings_dir = self.root / "pairings"
+        if not pairings_dir.exists():
+            return []
+        return sorted(p for p in pairings_dir.glob("p*") if p.is_dir())
+
+    def load_pairing(self, version_dir: str | Path) -> PairingPlan:
+        version_dir = Path(version_dir)
+        report = json.loads(
+            (version_dir / "pairing_report.json").read_text(encoding="utf-8")
+        )
+        return PairingPlan(
+            pairs=tuple(PairedMatch(**item) for item in report["pairs"]),
+            capacities={k: int(v) for k, v in report["capacities"].items()},
+            manual_locks=tuple(tuple(lock) for lock in report["manual_locks"]),
+            min_similarity=float(report["min_similarity"]),
+            rna_source=report["rna_source"],
+            protein_source=report["protein_source"],
+            source_fingerprints=report["source_fingerprints"],
+            batches=tuple(report["batches"]),
+            unpaired_rna=tuple(report["unpaired_rna"]),
+            unpaired_protein=tuple(report["unpaired_protein"]),
+            n_unobserved_candidates=int(report["n_unobserved_candidates"]),
+        )
+
+    def pairing_status(self, version_dir: str | Path) -> str:
+        """配对版本状态：ok / withdrawn:<来源>（依赖来源被撤回）。"""
+        meta = json.loads(
+            (Path(version_dir) / "meta.json").read_text(encoding="utf-8")
+        )
+        registry = self._load_registry()
+        for batch in meta.get("batches", []):
+            if registry.get(batch, {}).get("status") == "withdrawn":
+                return f"withdrawn:{batch}"
+        return "ok"
+
+    def verify_pairing(
+        self,
+        version_dir: str | Path,
+        rna: CountMatrix,
+        protein: CountMatrix,
+        *,
+        rna_measured: np.ndarray | None = None,
+        protein_measured: np.ndarray | None = None,
+    ) -> dict:
+        """重开配对版本并以共享来源、缺测掩码与人工锁定逐项核对。"""
+        version_dir = Path(version_dir)
+        problems: list[str] = []
+        status = self.pairing_status(version_dir)
+        if status != "ok":
+            problems.append(f"依赖来源已被撤回，配对方案失效: {status}")
+        plan = self.load_pairing(version_dir)
+        try:
+            self._validate_pairing(
+                plan, rna, protein, rna_measured=rna_measured,
+                protein_measured=protein_measured,
+            )
+        except PublishRejectedError as exc:
+            problems.extend(exc.reasons)
+        if problems:
+            raise PublishRejectedError(problems)
+        return {
+            "version": version_dir.name,
+            "status": "ok",
+            "n_pairs": plan.n_pairs,
+            "overall_consistency": plan.overall_consistency(),
+            "manual_locks": [list(lock) for lock in plan.manual_locks],
+            "unpaired_rna": list(plan.unpaired_rna),
+            "unpaired_protein": list(plan.unpaired_protein),
+            "n_unobserved_candidates": plan.n_unobserved_candidates,
         }

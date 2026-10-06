@@ -22,6 +22,16 @@ from .association import (
     associate_measurements,
     association_candidates,
 )
+from .pairing import (
+    PAIR_BASIS,
+    PairedMatch,
+    PairingCandidate,
+    PairingConflictError,
+    PairingPlan,
+    approve_pairs,
+    pairing_candidates,
+    solve_pairing,
+)
 
 __all__ = [
     "CountMatrix",
@@ -49,4 +59,12 @@ __all__ = [
     "MeasurementAssociation",
     "associate_measurements",
     "association_candidates",
+    "PAIR_BASIS",
+    "PairedMatch",
+    "PairingCandidate",
+    "PairingConflictError",
+    "PairingPlan",
+    "approve_pairs",
+    "pairing_candidates",
+    "solve_pairing",
 ]
